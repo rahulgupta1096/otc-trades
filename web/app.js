@@ -289,7 +289,7 @@ const TRADE_COLS = [
   { key: "price", label: "Price", sortable: true, render: (r) => r.price == null ? "" : withUnit(fmtNum(r.price, 4), r.price_unit) },
   { key: "strike_price", label: "Strike", sortable: true, render: (r) => fmtNum(r.strike_price, 4) },
   { key: "moneyness", label: "Mny", sortable: true, render: (r) => r.moneyness == null ? "" : Number(r.moneyness).toFixed(2) + "x" },
-  { key: "option_type", label: "Opt" },
+  { key: "option_cp", label: "Opt" },
   { key: "option_premium", label: "Premium", sortable: true, render: (r) => r.option_premium == null ? "" : fmtCompact(r.option_premium, "$") },
   { key: "tenor_yrs", label: "Tenor", sortable: true, render: (r) => r.tenor_yrs == null ? "" : Number(r.tenor_yrs).toFixed(1) + "y" },
   { key: "expiration_date", label: "Expiry", sortable: true, render: (r) => fmtDate(r.expiration_date) },
@@ -344,7 +344,7 @@ function groupSummaryValue(col, legs) {
       const lo = Math.min(...ks), hi = Math.max(...ks);
       return lo === hi ? fmtNum(lo, 0) : `${fmtNum(lo, 0)}–${fmtNum(hi, 0)}`;
     }
-    case "option_type": return [...new Set(legs.map((l) => l.option_type).filter(Boolean))].join("/");
+    case "option_cp": return [...new Set(legs.map((l) => l.option_cp).filter(Boolean))].join("/");
     case "option_premium": { const s = sum("option_premium"); return s == null ? "" : fmtCompact(s, "$"); }
     case "tenor_yrs": return first.tenor_yrs == null ? "" : Number(first.tenor_yrs).toFixed(1) + "y";
     case "expiration_date": return fmtDate(first.expiration_date);

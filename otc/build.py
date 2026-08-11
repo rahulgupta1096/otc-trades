@@ -127,19 +127,11 @@ def incremental(con: duckdb.DuckDBPyConnection) -> int:
     return len(new_files)
 
 
-SPOT_REF_SQL = """
-    select underlier_name, execution_date, median(price) as ref_price
-    from trades
-    where status <> 'error' and option_type is null and price > 0
-      and (upi_fisn like '%Tot Rtn%' or upi_fisn like '%TRtn%' or upi_fisn like '%Pr%')
-    group by 1, 2
-"""
-
-
 def build_summaries(con: duckdb.DuckDBPyConnection) -> None:
-    # Per-underlier daily reference level from non-option swap prints (their
-    # price is the underlying level), used to derive option moneyness.
-    con.execute(f"create or replace table spot_ref as {SPOT_REF_SQL}")
+    # Per-underlier daily reference level (see otc/spotref.py), used to derive
+    # option moneyness.
+    from .spotref import build_spot_ref_table
+    build_spot_ref_table(con)
     con.execute("""
         create or replace table underliers as
         select underlier_name,

@@ -57,7 +57,9 @@ GROUP_BYS = {
     "month": "date_trunc('month', execution_date)",
     "platform_id": "platform_id",
     "upi_fisn": "upi_fisn",
-    "option_type": "option_type",
+    "option_type": "case when upi_fisn like '%Call%' then 'Call' "
+                   "when upi_fisn like '%Put%' then 'Put' "
+                   "when upi_fisn like 'NA/O%' then 'Other option' end",
     "status": "status",
     "cleared": "cleared",
     "notional_ccy_leg1": "notional_ccy_leg1",
@@ -165,6 +167,8 @@ def trades(
                strike_price, option_type, option_style, option_premium,
                platform_id, cleared, block_trade, custom_basket, package,
                event_ts, file_date, first_event_ts,
+               case when upi_fisn like '%Call%' then 'C'
+                    when upi_fisn like '%Put%' then 'P' end as option_cp,
                datediff('day', execution_date, expiration_date) / 365.25 as tenor_yrs,
                notional_leg1 / nullif(total_notional_qty_leg1, 0) as per_unit,
                strike_price / nullif(ref_price, 0) as moneyness,

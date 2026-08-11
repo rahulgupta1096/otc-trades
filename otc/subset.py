@@ -76,12 +76,27 @@ def write_months(con: duckdb.DuckDBPyConnection, source: str, months: list[str] 
 
 
 def export_site(con: duckdb.DuckDBPyConnection) -> None:
+    from .spotref import compute_spot_ref
+
     glob = _posix(MONTHS_DIR / "*.parquet")
     out = SITE_DATA / "trades.parquet"
     con.execute(f"""
         copy (select * from read_parquet('{glob}') order by execution_ts)
         to '{_posix(out)}' (format parquet, compression zstd)
     """)
+    con.execute(f"""
+        create or replace temp view subset_trades as
+        select * from read_parquet('{glob}')
+    """)
+    ref_df = compute_spot_ref(con, src="subset_trades")
+    con.register("spot_ref_df", ref_df)
+    con.execute(f"""
+        copy (select underlier_name, cast(execution_date as date) execution_date,
+                     ref_price
+              from spot_ref_df)
+        to '{_posix(SITE_DATA / "spot_ref.parquet")}' (format parquet, compression zstd)
+    """)
+    con.unregister("spot_ref_df")
     n, latest = con.execute(
         f"select count(*), max(file_date) from read_parquet('{glob}')"
     ).fetchone()

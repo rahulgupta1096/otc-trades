@@ -3,4 +3,5 @@
 __pycache__/
 *.pyc
 /site/data/trades.parquet
+/site/data/spot_ref.parquet
 /site/data/meta.json

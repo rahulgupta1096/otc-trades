@@ -21,15 +21,19 @@ async function initDB() {
   await db.registerFileBuffer("trades.parquet", new Uint8Array(await resp.arrayBuffer()));
   conn = await db.connect();
   await conn.query("create view trades as select * from read_parquet('trades.parquet')");
-  // per-underlier daily reference level from non-option swap prints, for moneyness
-  await conn.query(`
-    create view spot_ref as
-    select underlier_name, execution_date, median(price) as ref_price
-    from trades
-    where status <> 'error' and option_type is null and price > 0
-      and (upi_fisn like '%Tot Rtn%' or upi_fisn like '%TRtn%' or upi_fisn like '%Pr%')
-    group by 1, 2
-  `);
+  // per-underlier daily reference level, precomputed by otc/spotref.py
+  try {
+    const refResp = await fetch(new URL("data/spot_ref.parquet", location.href));
+    if (!refResp.ok) throw new Error("no spot_ref");
+    await db.registerFileBuffer("spot_ref.parquet", new Uint8Array(await refResp.arrayBuffer()));
+    await conn.query("create view spot_ref as select * from read_parquet('spot_ref.parquet')");
+  } catch {
+    await conn.query(`
+      create view spot_ref as
+      select null::varchar underlier_name, null::date execution_date,
+             null::double ref_price where false
+    `);
+  }
 }
 
 async function q(sql) {
@@ -63,7 +67,9 @@ const GROUP_BYS = {
   month: "cast(date_trunc('month', execution_date) as varchar)",
   platform_id: "platform_id",
   upi_fisn: "upi_fisn",
-  option_type: "option_type",
+  option_type: "case when upi_fisn like '%Call%' then 'Call' " +
+    "when upi_fisn like '%Put%' then 'Put' " +
+    "when upi_fisn like 'NA/O%' then 'Other option' end",
   status: "status",
   notional_ccy_leg1: "notional_ccy_leg1",
 };
@@ -123,7 +129,9 @@ async function apiTrades(f, sortBy, sortDir, limit, offset) {
            notional_leg1, notional_ccy_leg1, notional_capped,
            total_notional_qty_leg1, qty_unit_leg1,
            price, price_unit, strike_price,
-           option_type, option_premium, platform_id, cleared,
+           option_premium, platform_id, cleared,
+           case when upi_fisn like '%Call%' then 'C'
+                when upi_fisn like '%Put%' then 'P' end as option_cp,
            datediff('day', execution_date, expiration_date) / 365.25 as tenor_yrs,
            notional_leg1 / nullif(total_notional_qty_leg1, 0) as per_unit,
            strike_price / nullif(ref_price, 0) as moneyness,
@@ -406,7 +414,7 @@ const TRADE_COLS = [
   { key: "price", label: "Price", sortable: true, render: (r) => r.price == null ? "" : withUnit(fmtNum(r.price, 4), r.price_unit) },
   { key: "strike_price", label: "Strike", sortable: true, render: (r) => fmtNum(r.strike_price, 4) },
   { key: "moneyness", label: "Mny", sortable: true, render: (r) => r.moneyness == null ? "" : Number(r.moneyness).toFixed(2) + "x" },
-  { key: "option_type", label: "Opt" },
+  { key: "option_cp", label: "Opt" },
   { key: "option_premium", label: "Premium", sortable: true, render: (r) => r.option_premium == null ? "" : fmtCompact(r.option_premium, "$") },
   { key: "tenor_yrs", label: "Tenor", sortable: true, render: (r) => r.tenor_yrs == null ? "" : Number(r.tenor_yrs).toFixed(1) + "y" },
   { key: "expiration_date", label: "Expiry", sortable: true, render: (r) => fmtDate(r.expiration_date) },
@@ -461,7 +469,7 @@ function groupSummaryValue(col, legs) {
       const lo = Math.min(...ks), hi = Math.max(...ks);
       return lo === hi ? fmtNum(lo, 0) : `${fmtNum(lo, 0)}–${fmtNum(hi, 0)}`;
     }
-    case "option_type": return [...new Set(legs.map((l) => l.option_type).filter(Boolean))].join("/");
+    case "option_cp": return [...new Set(legs.map((l) => l.option_cp).filter(Boolean))].join("/");
     case "option_premium": { const s = sum("option_premium"); return s == null ? "" : fmtCompact(s, "$"); }
     case "tenor_yrs": return first.tenor_yrs == null ? "" : Number(first.tenor_yrs).toFixed(1) + "y";
     case "expiration_date": return fmtDate(first.expiration_date);
