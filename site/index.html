@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OTC Index Trades</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>OTC Index Trades</h1>
+    <span id="freshness" class="muted">loading data…</span>
+  </header>
+
+  <section class="filters" aria-label="Filters">
+    <div class="field">
+      <label>Date range</label>
+      <select id="f-preset">
+        <option value="7">Last 7 days</option>
+        <option value="30" selected>Last 30 days</option>
+        <option value="90">Last 90 days</option>
+        <option value="365">Last year</option>
+        <option value="all">All history</option>
+        <option value="custom">Custom…</option>
+      </select>
+    </div>
+    <div class="field" id="custom-dates" hidden>
+      <label>From / to</label>
+      <span><input type="date" id="f-from"> <input type="date" id="f-to"></span>
+    </div>
+    <div class="field grow">
+      <label for="f-underlier">Underlier</label>
+      <input type="text" id="f-underlier" placeholder="e.g. S&amp;P 500 INDEX" autocomplete="off">
+      <div id="ac" class="ac" hidden></div>
+    </div>
+    <div class="field">
+      <label for="f-fisn">Product (FISN)</label>
+      <select id="f-fisn"><option value="">All</option></select>
+    </div>
+    <div class="field">
+      <label for="f-status">Status</label>
+      <select id="f-status">
+        <option value="active,terminated" selected>Active + terminated</option>
+        <option value="active">Active only</option>
+        <option value="active,terminated,error">Include errors</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-minnotional">Min notional</label>
+      <select id="f-minnotional">
+        <option value="">Any</option>
+        <option value="1000000">≥ $1M</option>
+        <option value="10000000">≥ $10M</option>
+        <option value="100000000">≥ $100M</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-ccy">Notional ccy</label>
+      <select id="f-ccy"><option value="">All</option></select>
+    </div>
+  </section>
+
+  <section class="tiles" id="tiles" aria-label="Summary"></section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2 id="chart-title">Daily volume</h2>
+      <div class="seg" role="tablist" aria-label="Chart metric">
+        <button class="seg-btn active" data-metric="sum_notional">Notional</button>
+        <button class="seg-btn" data-metric="n_trades">Trade count</button>
+      </div>
+    </div>
+    <div id="chart" class="chart"></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Aggregate</h2>
+      <div class="field inline">
+        <label for="agg-by">Group by</label>
+        <select id="agg-by">
+          <option value="underlier_name" selected>Underlier</option>
+          <option value="execution_date">Day</option>
+          <option value="week">Week</option>
+          <option value="month">Month</option>
+          <option value="upi_fisn">Product (FISN)</option>
+          <option value="platform_id">Platform</option>
+          <option value="notional_ccy_leg1">Currency</option>
+          <option value="option_type">Option type</option>
+          <option value="status">Status</option>
+        </select>
+      </div>
+    </div>
+    <div class="table-wrap"><table id="agg-table"></table></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Trades <span id="trade-count" class="muted"></span></h2>
+      <div class="pager">
+        <button id="pg-prev">‹ Prev</button>
+        <span id="pg-info" class="muted"></span>
+        <button id="pg-next">Next ›</button>
+      </div>
+    </div>
+    <div class="table-wrap"><table id="trades-table"></table></div>
+  </section>
+
+  <footer class="muted" style="margin-top:24px">
+    Index-product subset of CFTC cumulative equities dissemination data from
+    <a href="https://pddata.dtcc.com/ppd/cftcdashboard">DTCC PPD</a>,
+    deduplicated to final prints. Queries run in your browser via DuckDB-WASM.
+  </footer>
+</div>
+<div id="tooltip" class="tooltip" hidden></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

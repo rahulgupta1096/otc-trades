@@ -1,0 +1,6 @@
+.venv/
+/data/
+__pycache__/
+*.pyc
+/site/data/trades.parquet
+/site/data/meta.json

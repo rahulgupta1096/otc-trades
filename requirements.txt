@@ -1,0 +1,6 @@
+duckdb>=1.5
+pyarrow
+pandas
+fastapi
+uvicorn
+requests

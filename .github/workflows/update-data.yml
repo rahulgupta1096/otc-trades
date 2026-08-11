@@ -1,0 +1,59 @@
+name: Update data and deploy
+
+on:
+  schedule:
+    - cron: "0 12 * * *"   # daily, after DTCC publishes the prior day's file
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  update-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install duckdb requests
+
+      - name: Download recent daily files
+        run: python -m otc.download "$(date -u -d '9 days ago' +%F)" "$(date -u +%F)"
+
+      - name: Merge new days into the subset
+        run: python -m otc.subset update
+
+      - name: Commit updated monthly partitions
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add site/data/months
+          if ! git diff --cached --quiet; then
+            git commit -m "data: daily update $(date -u +%F)"
+            git push
+          fi
+
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

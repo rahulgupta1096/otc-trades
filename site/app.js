@@ -1,0 +1,546 @@
+"use strict";
+// Static version: the same UI as the local app, but queries run in-browser via
+// DuckDB-WASM against data/trades.parquet (final prints, index products only).
+
+import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm";
+
+// ---------------------------------------------------------------- db layer
+
+let conn = null;
+
+async function initDB() {
+  const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
+  const workerUrl = URL.createObjectURL(
+    new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" }));
+  const worker = new Worker(workerUrl);
+  const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING), worker);
+  await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+  URL.revokeObjectURL(workerUrl);
+  const resp = await fetch(new URL("data/trades.parquet", location.href));
+  if (!resp.ok) throw new Error("failed to fetch data/trades.parquet");
+  await db.registerFileBuffer("trades.parquet", new Uint8Array(await resp.arrayBuffer()));
+  conn = await db.connect();
+  await conn.query("create view trades as select * from read_parquet('trades.parquet')");
+}
+
+async function q(sql) {
+  const table = await conn.query(sql);
+  const rows = table.toArray().map((r) => {
+    const o = {};
+    for (const [k, v] of Object.entries(r.toJSON())) {
+      o[k] = typeof v === "bigint" ? Number(v) : v;
+    }
+    return o;
+  });
+  return rows;
+}
+
+const esc = (s) => String(s).replace(/'/g, "''");
+
+// ---------------------------------------------------------------- "api"
+
+const SORTABLE = new Set([
+  "execution_ts", "execution_date", "effective_date", "expiration_date",
+  "notional_leg1", "price", "strike_price", "total_notional_qty_leg1",
+  "underlier_name", "event_ts", "dissemination_id",
+]);
+
+const GROUP_BYS = {
+  all: "'all'",
+  underlier_name: "underlier_name",
+  execution_date: "cast(execution_date as varchar)",
+  week: "cast(date_trunc('week', execution_date) as varchar)",
+  month: "cast(date_trunc('month', execution_date) as varchar)",
+  platform_id: "platform_id",
+  upi_fisn: "upi_fisn",
+  option_type: "option_type",
+  status: "status",
+  notional_ccy_leg1: "notional_ccy_leg1",
+};
+
+function buildWhere(f) {
+  const c = [];
+  if (f.underlier) c.push(`upper(coalesce(underlier_name,'')) like '%${esc(f.underlier.toUpperCase())}%'`);
+  if (f.fisn) c.push(`upper(coalesce(upi_fisn,'')) like '%${esc(f.fisn.toUpperCase())}%'`);
+  const statuses = (f.status || "active,terminated").split(",").filter(Boolean);
+  c.push(`status in (${statuses.map((s) => `'${esc(s)}'`).join(",")})`);
+  if (f.date_from) c.push(`execution_date >= date '${esc(f.date_from)}'`);
+  if (f.date_to) c.push(`execution_date <= date '${esc(f.date_to)}'`);
+  if (f.min_notional) c.push(`notional_leg1 >= ${Number(f.min_notional)}`);
+  if (f.ccy) c.push(`notional_ccy_leg1 = '${esc(f.ccy)}'`);
+  return c.join(" and ");
+}
+
+async function apiMeta() {
+  const [r] = await q(`
+    select cast(min(execution_date) filter (where execution_date >= date '2000-01-01') as varchar) min_date,
+           cast(max(execution_date) as varchar) max_date,
+           cast(max(file_date) as varchar) latest_file,
+           count(*)::double n_trades
+    from trades where status <> 'error'
+  `);
+  r.fisns = (await q(`
+    select upi_fisn from trades where upi_fisn is not null
+    group by 1 order by count(*) desc limit 50
+  `)).map((x) => x.upi_fisn);
+  r.currencies = (await q(`
+    select notional_ccy_leg1 c from trades where notional_ccy_leg1 is not null
+    group by 1 order by count(*) desc limit 30
+  `)).map((x) => x.c);
+  return r;
+}
+
+async function apiUnderliers(query) {
+  return q(`
+    select underlier_name, count(*)::double n_trades
+    from trades
+    where underlier_name is not null and status <> 'error'
+      and upper(underlier_name) like '%${esc(query.toUpperCase())}%'
+    group by 1 order by n_trades desc limit 20
+  `);
+}
+
+async function apiTrades(f, sortBy, sortDir, limit, offset) {
+  if (!SORTABLE.has(sortBy)) sortBy = "execution_ts";
+  if (sortDir !== "asc" && sortDir !== "desc") sortDir = "desc";
+  const where = buildWhere(f);
+  const [{ n }] = await q(`select count(*)::double n from trades where ${where}`);
+  const rows = await q(`
+    select cast(dissemination_id as varchar) dissemination_id, status,
+           strftime(execution_ts, '%Y-%m-%d %H:%M') execution_ts,
+           cast(expiration_date as varchar) expiration_date,
+           underlier_name, upi_fisn,
+           notional_leg1, notional_ccy_leg1, notional_capped,
+           total_notional_qty_leg1, price, strike_price,
+           option_type, platform_id, cleared,
+           strftime(event_ts, '%Y-%m-%d %H:%M') event_ts
+    from trades where ${where}
+    order by ${sortBy} ${sortDir} nulls last
+    limit ${limit} offset ${offset}
+  `);
+  return { total: n, rows };
+}
+
+async function apiAggregate(groupBy, f, limit = 500) {
+  const expr = GROUP_BYS[groupBy] || GROUP_BYS.execution_date;
+  const where = buildWhere(f);
+  const order = ["execution_date", "week", "month"].includes(groupBy)
+    ? "1" : "sum_notional desc nulls last";
+  return q(`
+    select ${expr} as key,
+           count(*)::double as n_trades,
+           sum(notional_leg1) as sum_notional,
+           median(notional_leg1) as median_notional,
+           avg(price) as avg_price
+    from trades where ${where}
+    group by 1 order by ${order} limit ${limit}
+  `);
+}
+
+// ---------------------------------------------------------------- state
+
+const state = {
+  preset: "30", from: null, to: null,
+  underlier: "", fisn: "", status: "active,terminated",
+  minNotional: "", ccy: "",
+  metric: "sum_notional", aggBy: "underlier_name",
+  sortBy: "execution_ts", sortDir: "desc",
+  page: 0, pageSize: 50, total: 0,
+};
+
+const $ = (id) => document.getElementById(id);
+const tooltip = $("tooltip");
+
+// ---------------------------------------------------------------- utils
+
+function fmtCompact(v, prefix = "") {
+  if (v == null || isNaN(v)) return "–";
+  const abs = Math.abs(v);
+  if (abs >= 1e12) return prefix + (v / 1e12).toFixed(2) + "T";
+  if (abs >= 1e9) return prefix + (v / 1e9).toFixed(2) + "B";
+  if (abs >= 1e6) return prefix + (v / 1e6).toFixed(1) + "M";
+  if (abs >= 1e3) return prefix + (v / 1e3).toFixed(1) + "K";
+  return prefix + Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+function fmtNum(v, digits = 2) {
+  if (v == null || isNaN(v)) return "";
+  return Number(v).toLocaleString(undefined, { maximumFractionDigits: digits });
+}
+function fmtDate(v) { return v ? String(v).slice(0, 10) : ""; }
+function isoDaysAgo(n) {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+function currentDates() {
+  if (state.preset === "custom") return { from: state.from, to: state.to };
+  if (state.preset === "all") return { from: null, to: null };
+  return { from: isoDaysAgo(Number(state.preset)), to: null };
+}
+function filters() {
+  const { from, to } = currentDates();
+  return {
+    underlier: state.underlier, fisn: state.fisn, status: state.status,
+    date_from: from, date_to: to, min_notional: state.minNotional, ccy: state.ccy,
+  };
+}
+
+function showTooltip(parts, x, y) {
+  tooltip.replaceChildren(...parts);
+  tooltip.hidden = false;
+  const rect = tooltip.getBoundingClientRect();
+  tooltip.style.left = Math.min(x + 14, window.innerWidth - rect.width - 8) + "px";
+  tooltip.style.top = Math.min(y + 14, window.innerHeight - rect.height - 8) + "px";
+}
+function hideTooltip() { tooltip.hidden = true; }
+function ttEl(cls, text) {
+  const d = document.createElement("div");
+  d.className = cls;
+  d.textContent = text;
+  return d;
+}
+
+// ---------------------------------------------------------------- tiles
+
+function renderTiles(summary) {
+  const tiles = [
+    ["Trades", fmtCompact(summary.n)],
+    ["Total notional (leg 1)", fmtCompact(summary.notional, "$")],
+    ["Median notional", fmtCompact(summary.median, "$")],
+    ["Underliers", fmtCompact(summary.underliers)],
+  ];
+  $("tiles").replaceChildren(...tiles.map(([label, value]) => {
+    const t = document.createElement("div");
+    t.className = "tile";
+    t.append(ttEl("label", label), ttEl("value", value));
+    return t;
+  }));
+}
+
+// ---------------------------------------------------------------- chart
+
+function renderChart(rows, metric) {
+  const root = $("chart");
+  const W = root.clientWidth || 1100;
+  const H = 260;
+  const m = { top: 14, right: 12, bottom: 26, left: 64 };
+  const iw = W - m.left - m.right;
+  const ih = H - m.top - m.bottom;
+
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.style.padding = "40px 0";
+    empty.style.textAlign = "center";
+    empty.textContent = "No trades match the current filters.";
+    root.replaceChildren(empty);
+    return;
+  }
+
+  const values = rows.map((r) => Number(r[metric]) || 0);
+  const maxV = Math.max(...values, 1);
+  const rawStep = maxV / 4;
+  const pow = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const step = [1, 2, 5, 10].map((s) => s * pow).find((s) => s >= rawStep);
+  const yMax = Math.ceil(maxV / step) * step;
+
+  const css = getComputedStyle(document.documentElement);
+  const cGrid = css.getPropertyValue("--grid").trim();
+  const cBase = css.getPropertyValue("--baseline").trim();
+  const cMuted = css.getPropertyValue("--muted").trim();
+  const cSeries = css.getPropertyValue("--series-1").trim();
+
+  for (let v = 0; v <= yMax; v += step) {
+    const y = m.top + ih - (v / yMax) * ih;
+    const line = document.createElementNS(svgNS, "line");
+    line.setAttribute("x1", m.left); line.setAttribute("x2", m.left + iw);
+    line.setAttribute("y1", y); line.setAttribute("y2", y);
+    line.setAttribute("stroke", v === 0 ? cBase : cGrid);
+    line.setAttribute("stroke-width", "1");
+    svg.append(line);
+    const t = document.createElementNS(svgNS, "text");
+    t.setAttribute("x", m.left - 8); t.setAttribute("y", y + 4);
+    t.setAttribute("text-anchor", "end");
+    t.setAttribute("fill", cMuted); t.setAttribute("font-size", "11");
+    t.textContent = metric === "sum_notional" ? fmtCompact(v, "$") : fmtCompact(v);
+    svg.append(t);
+  }
+
+  const n = rows.length;
+  const band = iw / n;
+  const gap = Math.min(2, band * 0.2);
+  const barW = Math.min(24, Math.max(1, band - gap));
+
+  rows.forEach((r, i) => {
+    const v = Number(r[metric]) || 0;
+    const h = (v / yMax) * ih;
+    const x = m.left + i * band + (band - barW) / 2;
+    const y = m.top + ih - h;
+    const rTop = Math.min(4, barW / 2, h);
+    const path = document.createElementNS(svgNS, "path");
+    path.setAttribute("d",
+      `M ${x} ${m.top + ih} V ${y + rTop} Q ${x} ${y} ${x + rTop} ${y} ` +
+      `H ${x + barW - rTop} Q ${x + barW} ${y} ${x + barW} ${y + rTop} V ${m.top + ih} Z`);
+    path.setAttribute("fill", cSeries);
+    svg.append(path);
+
+    const hit = document.createElementNS(svgNS, "rect");
+    hit.setAttribute("x", m.left + i * band); hit.setAttribute("y", m.top);
+    hit.setAttribute("width", band); hit.setAttribute("height", ih);
+    hit.setAttribute("fill", "transparent");
+    hit.addEventListener("pointermove", (e) => {
+      path.setAttribute("opacity", "0.75");
+      showTooltip([
+        ttEl("tt-value", metric === "sum_notional" ? fmtCompact(v, "$") : fmtCompact(v)),
+        ttEl("tt-label", `${r.key_label} · ${Number(r.n_trades).toLocaleString()} trades`),
+      ], e.clientX, e.clientY);
+    });
+    hit.addEventListener("pointerleave", () => {
+      path.removeAttribute("opacity");
+      hideTooltip();
+    });
+    svg.append(hit);
+  });
+
+  const every = Math.max(1, Math.round(n / 8));
+  rows.forEach((r, i) => {
+    if (i % every !== 0 && i !== n - 1) return;
+    const t = document.createElementNS(svgNS, "text");
+    t.setAttribute("x", m.left + i * band + band / 2);
+    t.setAttribute("y", m.top + ih + 18);
+    t.setAttribute("text-anchor", "middle");
+    t.setAttribute("fill", cMuted); t.setAttribute("font-size", "11");
+    t.textContent = r.key_label;
+    svg.append(t);
+  });
+
+  root.replaceChildren(svg);
+}
+
+// ---------------------------------------------------------------- tables
+
+function makeTable(tableEl, headers, rows, onHeaderClick) {
+  const thead = document.createElement("thead");
+  const trh = document.createElement("tr");
+  headers.forEach((h) => {
+    const th = document.createElement("th");
+    th.textContent = h.label + (h.key === state.sortBy && onHeaderClick ? (state.sortDir === "desc" ? " ↓" : " ↑") : "");
+    if (h.sortable && onHeaderClick) {
+      th.className = "sortable";
+      th.addEventListener("click", () => onHeaderClick(h.key));
+    }
+    trh.append(th);
+  });
+  thead.append(trh);
+  const tbody = document.createElement("tbody");
+  rows.forEach((r) => {
+    const tr = document.createElement("tr");
+    headers.forEach((h) => {
+      const td = document.createElement("td");
+      const v = h.render ? h.render(r) : r[h.key];
+      if (v instanceof Node) td.append(v);
+      else td.textContent = v == null ? "" : String(v);
+      if (h.cls) td.className = h.cls;
+      tr.append(td);
+    });
+    tbody.append(tr);
+  });
+  tableEl.replaceChildren(thead, tbody);
+}
+
+function badge(status) {
+  const s = document.createElement("span");
+  s.className = "badge " + status;
+  s.textContent = status;
+  return s;
+}
+
+const TRADE_COLS = [
+  { key: "execution_ts", label: "Executed", sortable: true },
+  { key: "underlier_name", label: "Underlier", sortable: true, cls: "name" },
+  { key: "upi_fisn", label: "Product", cls: "name" },
+  { key: "notional_leg1", label: "Notional", sortable: true, render: (r) => fmtCompact(r.notional_leg1, "") + (r.notional_capped ? "+" : "") },
+  { key: "notional_ccy_leg1", label: "Ccy" },
+  { key: "total_notional_qty_leg1", label: "Qty", render: (r) => fmtNum(r.total_notional_qty_leg1, 0) },
+  { key: "price", label: "Price", sortable: true, render: (r) => fmtNum(r.price, 4) },
+  { key: "strike_price", label: "Strike", sortable: true, render: (r) => fmtNum(r.strike_price, 4) },
+  { key: "option_type", label: "Opt" },
+  { key: "expiration_date", label: "Expiry", sortable: true, render: (r) => fmtDate(r.expiration_date) },
+  { key: "platform_id", label: "Venue" },
+  { key: "cleared", label: "Clr" },
+  { key: "status", label: "Status", render: (r) => badge(r.status) },
+  { key: "event_ts", label: "Last event" },
+];
+
+// ---------------------------------------------------------------- loads
+
+let reqSeq = 0;
+
+async function loadAll() {
+  const seq = ++reqSeq;
+  document.body.style.cursor = "progress";
+  try {
+    await Promise.all([loadChartAndTiles(seq), loadAgg(seq), loadTrades(seq)]);
+  } finally {
+    document.body.style.cursor = "";
+  }
+}
+
+async function loadChartAndTiles(seq) {
+  const days = state.preset === "all" ? 9999 : state.preset === "custom"
+    ? (state.from && state.to ? (new Date(state.to) - new Date(state.from)) / 864e5 : 9999)
+    : Number(state.preset);
+  const gran = days <= 130 ? "execution_date" : days <= 800 ? "week" : "month";
+  $("chart-title").textContent =
+    (gran === "execution_date" ? "Daily" : gran === "week" ? "Weekly" : "Monthly") +
+    (state.metric === "sum_notional" ? " notional (leg 1)" : " trade count");
+
+  const rows = await apiAggregate(gran, filters());
+  if (seq !== reqSeq) return;
+  rows.forEach((r) => { r.key_label = fmtDate(r.key); });
+  renderChart(rows, state.metric);
+
+  const [o = {}] = await apiAggregate("all", filters());
+  if (seq !== reqSeq) return;
+  const und = await apiAggregate("underlier_name", filters(), 100000);
+  if (seq !== reqSeq) return;
+  renderTiles({
+    n: Number(o.n_trades || 0),
+    notional: o.sum_notional != null ? Number(o.sum_notional) : null,
+    median: o.median_notional != null ? Number(o.median_notional) : null,
+    underliers: und.length,
+  });
+}
+
+async function loadAgg(seq) {
+  const rows = await apiAggregate(state.aggBy, filters(), 200);
+  if (seq !== reqSeq) return;
+  const isDate = ["execution_date", "week", "month"].includes(state.aggBy);
+  makeTable($("agg-table"), [
+    { key: "key", label: "Group", cls: "name", render: (r) => isDate ? fmtDate(r.key) : (r.key ?? "(blank)") },
+    { key: "n_trades", label: "Trades", render: (r) => fmtNum(r.n_trades, 0) },
+    { key: "sum_notional", label: "Σ notional", render: (r) => fmtCompact(r.sum_notional, "$") },
+    { key: "median_notional", label: "Median notional", render: (r) => fmtCompact(r.median_notional, "$") },
+    { key: "avg_price", label: "Avg price", render: (r) => fmtNum(r.avg_price, 2) },
+  ], rows, null);
+}
+
+async function loadTrades(seq) {
+  const data = await apiTrades(filters(), state.sortBy, state.sortDir,
+    state.pageSize, state.page * state.pageSize);
+  if (seq !== reqSeq) return;
+  state.total = data.total;
+  $("trade-count").textContent = `· ${data.total.toLocaleString()} match`;
+  const maxPage = Math.max(0, Math.ceil(data.total / state.pageSize) - 1);
+  $("pg-info").textContent = `page ${state.page + 1} / ${maxPage + 1}`;
+  $("pg-prev").disabled = state.page === 0;
+  $("pg-next").disabled = state.page >= maxPage;
+  makeTable($("trades-table"), TRADE_COLS, data.rows, (key) => {
+    if (state.sortBy === key) state.sortDir = state.sortDir === "desc" ? "asc" : "desc";
+    else { state.sortBy = key; state.sortDir = "desc"; }
+    state.page = 0;
+    loadTrades(++reqSeq);
+  });
+}
+
+// ---------------------------------------------------------------- autocomplete
+
+let acTimer = null;
+function wireAutocomplete() {
+  const input = $("f-underlier");
+  const box = $("ac");
+  input.addEventListener("input", () => {
+    clearTimeout(acTimer);
+    acTimer = setTimeout(async () => {
+      const qs = input.value.trim();
+      if (qs.length < 2) { box.hidden = true; applyUnderlier(qs); return; }
+      const rows = await apiUnderliers(qs);
+      box.replaceChildren(...rows.map((r) => {
+        const d = document.createElement("div");
+        d.className = "ac-item";
+        const name = document.createElement("span");
+        name.textContent = r.underlier_name;
+        const nEl = document.createElement("span");
+        nEl.className = "n";
+        nEl.textContent = Number(r.n_trades).toLocaleString();
+        d.append(name, nEl);
+        d.addEventListener("click", () => {
+          input.value = r.underlier_name;
+          box.hidden = true;
+          applyUnderlier(r.underlier_name);
+        });
+        return d;
+      }));
+      box.hidden = rows.length === 0;
+      applyUnderlier(qs);
+    }, 250);
+  });
+  document.addEventListener("click", (e) => {
+    if (!box.contains(e.target) && e.target !== input) box.hidden = true;
+  });
+}
+function applyUnderlier(v) {
+  if (state.underlier === v) return;
+  state.underlier = v;
+  state.page = 0;
+  loadAll();
+}
+
+// ---------------------------------------------------------------- wiring
+
+async function init() {
+  await initDB();
+  const meta = await apiMeta();
+  $("freshness").textContent =
+    `${Number(meta.n_trades).toLocaleString()} final prints · ${fmtDate(meta.min_date)} → ${fmtDate(meta.max_date)} · latest file ${fmtDate(meta.latest_file)}`;
+  const fisn = $("f-fisn");
+  meta.fisns.forEach((f) => {
+    const o = document.createElement("option");
+    o.value = f; o.textContent = f;
+    fisn.append(o);
+  });
+  const ccy = $("f-ccy");
+  meta.currencies.forEach((c) => {
+    const o = document.createElement("option");
+    o.value = c; o.textContent = c;
+    ccy.append(o);
+  });
+
+  $("f-preset").addEventListener("change", (e) => {
+    state.preset = e.target.value;
+    $("custom-dates").hidden = state.preset !== "custom";
+    state.page = 0;
+    if (state.preset !== "custom") loadAll();
+  });
+  $("f-from").addEventListener("change", (e) => { state.from = e.target.value; state.page = 0; loadAll(); });
+  $("f-to").addEventListener("change", (e) => { state.to = e.target.value; state.page = 0; loadAll(); });
+  $("f-fisn").addEventListener("change", (e) => { state.fisn = e.target.value; state.page = 0; loadAll(); });
+  $("f-status").addEventListener("change", (e) => { state.status = e.target.value; state.page = 0; loadAll(); });
+  $("f-minnotional").addEventListener("change", (e) => { state.minNotional = e.target.value; state.page = 0; loadAll(); });
+  $("f-ccy").addEventListener("change", (e) => { state.ccy = e.target.value; state.page = 0; loadAll(); });
+
+  document.querySelectorAll(".seg-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      document.querySelectorAll(".seg-btn").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+      state.metric = b.dataset.metric;
+      loadChartAndTiles(++reqSeq);
+    });
+  });
+
+  $("agg-by").addEventListener("change", (e) => { state.aggBy = e.target.value; loadAgg(++reqSeq); });
+  $("pg-prev").addEventListener("click", () => { state.page--; loadTrades(++reqSeq); });
+  $("pg-next").addEventListener("click", () => { state.page++; loadTrades(++reqSeq); });
+
+  wireAutocomplete();
+  await loadAll();
+}
+
+init().catch((e) => {
+  $("freshness").textContent = "failed to load";
+  document.body.prepend(Object.assign(document.createElement("pre"), { textContent: "Failed to load: " + (e.message || e) }));
+});
