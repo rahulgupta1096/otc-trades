@@ -29,10 +29,17 @@ import duckdb
 
 from .config import DATA_DIR, DB_PATH, PARQUET_DIR
 
+# first_event_ts is the earliest dissemination we have for the chain: the
+# original report's timestamp when the chain root is inside our window, or the
+# first lifecycle event we captured otherwise. Rows entering via BASE carry a
+# null placeholder; previously-built final rows carry their stored value, so
+# incremental merges preserve the true minimum.
 FINAL_SELECT = """
     select * exclude (rn)
     from (
-        select *,
+        select *
+            replace (min(coalesce(first_event_ts, event_ts))
+                         over (partition by chain_id) as first_event_ts),
             row_number() over (
                 partition by chain_id
                 order by event_ts desc nulls last, file_date desc, dissemination_id desc
@@ -58,7 +65,8 @@ BASE_COLUMNS_SQL = """
         when action_type = 'TERM' or event_type = 'ETRM' then 'terminated'
         else 'active'
     end as status,
-    cast(execution_ts as date) as execution_date
+    cast(execution_ts as date) as execution_date,
+    cast(null as timestamp) as first_event_ts
 """
 
 
@@ -119,7 +127,19 @@ def incremental(con: duckdb.DuckDBPyConnection) -> int:
     return len(new_files)
 
 
+SPOT_REF_SQL = """
+    select underlier_name, execution_date, median(price) as ref_price
+    from trades
+    where status <> 'error' and option_type is null and price > 0
+      and (upi_fisn like '%Tot Rtn%' or upi_fisn like '%TRtn%' or upi_fisn like '%Pr%')
+    group by 1, 2
+"""
+
+
 def build_summaries(con: duckdb.DuckDBPyConnection) -> None:
+    # Per-underlier daily reference level from non-option swap prints (their
+    # price is the underlying level), used to derive option moneyness.
+    con.execute(f"create or replace table spot_ref as {SPOT_REF_SQL}")
     con.execute("""
         create or replace table underliers as
         select underlier_name,

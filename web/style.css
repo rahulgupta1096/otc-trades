@@ -116,6 +116,16 @@ tr:hover td { background: var(--series-1-soft); }
 
 .pager { display: flex; gap: 10px; align-items: center; }
 
+.unit {
+  font-size: 10px; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 0 4px; margin-left: 5px;
+}
+tr.grp td { font-weight: 600; cursor: pointer; }
+tr.grp .caret { display: inline-block; width: 14px; color: var(--muted); }
+tr.leg td { color: var(--text-secondary); }
+tr.leg td:first-child { padding-left: 28px; }
+
 /* ---- tooltip ---- */
 .tooltip {
   position: fixed; z-index: 50; pointer-events: none;

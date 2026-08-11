@@ -46,6 +46,25 @@ function fmtTs(v) {
   if (!v) return "";
   return String(v).replace("T", " ").slice(0, 16);
 }
+function fmtLag(s) {
+  if (s == null || isNaN(s) || s < 0) return "";
+  if (s < 60) return Math.round(s) + "s";
+  if (s < 3600) return Math.round(s / 60) + "m";
+  if (s < 86400) return (s / 3600).toFixed(1) + "h";
+  if (s < 31557600) return Math.round(s / 86400) + "d";
+  return (s / 31557600).toFixed(1) + "y";
+}
+function withUnit(text, unit) {
+  const frag = document.createDocumentFragment();
+  frag.append(document.createTextNode(text));
+  if (unit) {
+    const u = document.createElement("span");
+    u.className = "unit";
+    u.textContent = unit;
+    frag.append(u);
+  }
+  return frag;
+}
 function isoDaysAgo(n) {
   const d = new Date();
   d.setDate(d.getDate() - n);
@@ -265,16 +284,142 @@ const TRADE_COLS = [
   { key: "upi_fisn", label: "Product", cls: "name" },
   { key: "notional_leg1", label: "Notional", sortable: true, render: (r) => fmtCompact(r.notional_leg1, "") + (r.notional_capped ? "+" : "") },
   { key: "notional_ccy_leg1", label: "Ccy" },
-  { key: "total_notional_qty_leg1", label: "Qty", render: (r) => fmtNum(r.total_notional_qty_leg1, 0) },
-  { key: "price", label: "Price", sortable: true, render: (r) => fmtNum(r.price, 4) },
+  { key: "total_notional_qty_leg1", label: "Qty", render: (r) => r.total_notional_qty_leg1 == null ? "" : withUnit(fmtNum(r.total_notional_qty_leg1, 0), r.qty_unit_leg1) },
+  { key: "per_unit", label: "$/unit", sortable: true, render: (r) => fmtNum(r.per_unit, 2) },
+  { key: "price", label: "Price", sortable: true, render: (r) => r.price == null ? "" : withUnit(fmtNum(r.price, 4), r.price_unit) },
   { key: "strike_price", label: "Strike", sortable: true, render: (r) => fmtNum(r.strike_price, 4) },
+  { key: "moneyness", label: "Mny", sortable: true, render: (r) => r.moneyness == null ? "" : Number(r.moneyness).toFixed(2) + "x" },
   { key: "option_type", label: "Opt" },
+  { key: "option_premium", label: "Premium", sortable: true, render: (r) => r.option_premium == null ? "" : fmtCompact(r.option_premium, "$") },
+  { key: "tenor_yrs", label: "Tenor", sortable: true, render: (r) => r.tenor_yrs == null ? "" : Number(r.tenor_yrs).toFixed(1) + "y" },
   { key: "expiration_date", label: "Expiry", sortable: true, render: (r) => fmtDate(r.expiration_date) },
+  { key: "lag_seconds", label: "Lag", sortable: true, render: (r) => fmtLag(r.lag_seconds) },
   { key: "platform_id", label: "Venue" },
   { key: "cleared", label: "Clr" },
   { key: "status", label: "Status", render: (r) => badge(r.status) },
-  { key: "event_ts", label: "Last event", render: (r) => fmtTs(r.event_ts) },
 ];
+
+// ---- structure grouping: adjacent rows sharing UPI + expiry + a 5s execution
+// bucket collapse into an expandable package when sorted by execution time.
+
+function groupKey(r) {
+  if (!r.execution_ts || !r.upi) return null;
+  const t = Date.parse(String(r.execution_ts).replace(" ", "T"));
+  if (isNaN(t)) return null;
+  return r.upi + "|" + (r.expiration_date || "") + "|" + Math.floor(t / 5000);
+}
+
+function groupSummaryValue(col, legs) {
+  const first = legs[0];
+  const sum = (k) => legs.some((l) => l[k] != null)
+    ? legs.reduce((a, l) => a + (Number(l[k]) || 0), 0) : null;
+  switch (col.key) {
+    case "execution_ts": {
+      const frag = document.createDocumentFragment();
+      const caret = document.createElement("span");
+      caret.className = "caret";
+      caret.textContent = "▸";
+      frag.append(caret, document.createTextNode(fmtTs(first.execution_ts)));
+      return frag;
+    }
+    case "underlier_name": return first.underlier_name;
+    case "upi_fisn": return `${legs.length}-leg structure`;
+    case "notional_leg1": return fmtCompact(sum("notional_leg1"), "");
+    case "notional_ccy_leg1": return first.notional_ccy_leg1;
+    case "total_notional_qty_leg1": {
+      const units = new Set(legs.map((l) => l.qty_unit_leg1));
+      return units.size === 1 && legs[0].total_notional_qty_leg1 != null
+        ? withUnit(fmtNum(sum("total_notional_qty_leg1"), 0), first.qty_unit_leg1) : "";
+    }
+    case "strike_price": {
+      const ks = legs.map((l) => l.strike_price).filter((v) => v != null);
+      if (!ks.length) return "";
+      const lo = Math.min(...ks), hi = Math.max(...ks);
+      return lo === hi ? fmtNum(lo, 0) : `${fmtNum(lo, 0)}–${fmtNum(hi, 0)}`;
+    }
+    case "option_type": return [...new Set(legs.map((l) => l.option_type).filter(Boolean))].join("/");
+    case "option_premium": { const s = sum("option_premium"); return s == null ? "" : fmtCompact(s, "$"); }
+    case "tenor_yrs": return first.tenor_yrs == null ? "" : Number(first.tenor_yrs).toFixed(1) + "y";
+    case "expiration_date": return fmtDate(first.expiration_date);
+    case "lag_seconds": {
+      const ls = legs.map((l) => l.lag_seconds).filter((v) => v != null);
+      return ls.length ? fmtLag(Math.min(...ls)) : "";
+    }
+    case "platform_id": return first.platform_id;
+    case "cleared": return first.cleared;
+    case "status": return badge(first.status);
+    default: return "";
+  }
+}
+
+function buildTradesTable(rows, onHeaderClick) {
+  const tableEl = $("trades-table");
+  const thead = document.createElement("thead");
+  const trh = document.createElement("tr");
+  TRADE_COLS.forEach((h) => {
+    const th = document.createElement("th");
+    th.textContent = h.label + (h.key === state.sortBy ? (state.sortDir === "desc" ? " ↓" : " ↑") : "");
+    if (h.sortable) {
+      th.className = "sortable";
+      th.addEventListener("click", () => onHeaderClick(h.key));
+    }
+    trh.append(th);
+  });
+  thead.append(trh);
+
+  const groupingOn = state.sortBy === "execution_ts";
+  const blocks = [];
+  rows.forEach((r) => {
+    const k = groupingOn ? groupKey(r) : null;
+    const last = blocks[blocks.length - 1];
+    if (k && last && last.key === k) last.legs.push(r);
+    else blocks.push({ key: k, legs: [r] });
+  });
+
+  const renderRow = (r, cls) => {
+    const tr = document.createElement("tr");
+    if (cls) tr.className = cls;
+    TRADE_COLS.forEach((h) => {
+      const td = document.createElement("td");
+      const v = h.render ? h.render(r) : r[h.key];
+      if (v instanceof Node) td.append(v);
+      else td.textContent = v == null ? "" : String(v);
+      if (h.cls) td.className = h.cls;
+      tr.append(td);
+    });
+    return tr;
+  };
+
+  const tbody = document.createElement("tbody");
+  blocks.forEach((b) => {
+    if (b.legs.length === 1) {
+      tbody.append(renderRow(b.legs[0]));
+      return;
+    }
+    const grp = document.createElement("tr");
+    grp.className = "grp";
+    TRADE_COLS.forEach((h) => {
+      const td = document.createElement("td");
+      const v = groupSummaryValue(h, b.legs);
+      if (v instanceof Node) td.append(v);
+      else td.textContent = v == null ? "" : String(v);
+      if (h.cls) td.className = h.cls;
+      grp.append(td);
+    });
+    const legRows = b.legs.map((r) => {
+      const tr = renderRow(r, "leg");
+      tr.hidden = true;
+      return tr;
+    });
+    grp.addEventListener("click", () => {
+      const open = !legRows[0].hidden;
+      legRows.forEach((tr) => { tr.hidden = open; });
+      grp.querySelector(".caret").textContent = open ? "▸" : "▾";
+    });
+    tbody.append(grp, ...legRows);
+  });
+  tableEl.replaceChildren(thead, tbody);
+}
 
 // ---------------------------------------------------------------- loads
 
@@ -359,7 +504,7 @@ async function loadTrades(seq) {
   $("pg-info").textContent = `page ${state.page + 1} / ${maxPage + 1}`;
   $("pg-prev").disabled = state.page === 0;
   $("pg-next").disabled = state.page >= maxPage;
-  makeTable($("trades-table"), TRADE_COLS, data.rows, (key) => {
+  buildTradesTable(data.rows, (key) => {
     if (state.sortBy === key) state.sortDir = state.sortDir === "desc" ? "asc" : "desc";
     else { state.sortBy = key; state.sortDir = "desc"; }
     state.page = 0;

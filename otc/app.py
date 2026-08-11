@@ -46,6 +46,7 @@ SORTABLE = {
     "execution_ts", "execution_date", "effective_date", "expiration_date",
     "notional_leg1", "price", "strike_price", "total_notional_qty_leg1",
     "underlier_name", "event_ts", "dissemination_id",
+    "tenor_yrs", "per_unit", "moneyness", "lag_seconds", "option_premium",
 }
 
 GROUP_BYS = {
@@ -163,8 +164,14 @@ def trades(
                price, price_ccy, price_unit, spread_leg1, spread_leg2,
                strike_price, option_type, option_style, option_premium,
                platform_id, cleared, block_trade, custom_basket, package,
-               event_ts, file_date
-        from trades where {where}
+               event_ts, file_date, first_event_ts,
+               datediff('day', execution_date, expiration_date) / 365.25 as tenor_yrs,
+               notional_leg1 / nullif(total_notional_qty_leg1, 0) as per_unit,
+               strike_price / nullif(ref_price, 0) as moneyness,
+               epoch(first_event_ts - execution_ts) as lag_seconds
+        from trades
+        left join spot_ref using (underlier_name, execution_date)
+        where {where}
         order by {sort_by} {sort_dir} nulls last
         limit ? offset ?
     """, params + [limit, offset])
