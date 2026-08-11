@@ -416,6 +416,13 @@ const TRADE_COLS = [
   { key: "status", label: "Status", render: (r) => badge(r.status) },
 ];
 
+const COLS_LS_KEY = "otc_visible_cols";
+let visibleColKeys = new Set(
+  JSON.parse(localStorage.getItem(COLS_LS_KEY) || "null") || TRADE_COLS.map((c) => c.key));
+function visibleCols() {
+  return TRADE_COLS.filter((c) => visibleColKeys.has(c.key));
+}
+
 // ---- structure grouping: adjacent rows sharing UPI + expiry + a 5s execution
 // bucket collapse into an expandable package when sorted by execution time.
 
@@ -470,10 +477,11 @@ function groupSummaryValue(col, legs) {
 }
 
 function buildTradesTable(rows, onHeaderClick) {
+  const cols = visibleCols();
   const tableEl = $("trades-table");
   const thead = document.createElement("thead");
   const trh = document.createElement("tr");
-  TRADE_COLS.forEach((h) => {
+  cols.forEach((h) => {
     const th = document.createElement("th");
     th.textContent = h.label + (h.key === state.sortBy ? (state.sortDir === "desc" ? " ↓" : " ↑") : "");
     if (h.sortable) {
@@ -496,7 +504,7 @@ function buildTradesTable(rows, onHeaderClick) {
   const renderRow = (r, cls) => {
     const tr = document.createElement("tr");
     if (cls) tr.className = cls;
-    TRADE_COLS.forEach((h) => {
+    cols.forEach((h) => {
       const td = document.createElement("td");
       const v = h.render ? h.render(r) : r[h.key];
       if (v instanceof Node) td.append(v);
@@ -515,7 +523,7 @@ function buildTradesTable(rows, onHeaderClick) {
     }
     const grp = document.createElement("tr");
     grp.className = "grp";
-    TRADE_COLS.forEach((h) => {
+    cols.forEach((h) => {
       const td = document.createElement("td");
       const v = groupSummaryValue(h, b.legs);
       if (v instanceof Node) td.append(v);
@@ -531,7 +539,8 @@ function buildTradesTable(rows, onHeaderClick) {
     grp.addEventListener("click", () => {
       const open = !legRows[0].hidden;
       legRows.forEach((tr) => { tr.hidden = open; });
-      grp.querySelector(".caret").textContent = open ? "▸" : "▾";
+      const caret = grp.querySelector(".caret");
+      if (caret) caret.textContent = open ? "▸" : "▾";
     });
     tbody.append(grp, ...legRows);
   });
@@ -601,11 +610,43 @@ async function loadTrades(seq) {
   $("pg-info").textContent = `page ${state.page + 1} / ${maxPage + 1}`;
   $("pg-prev").disabled = state.page === 0;
   $("pg-next").disabled = state.page >= maxPage;
-  buildTradesTable(data.rows, (key) => {
-    if (state.sortBy === key) state.sortDir = state.sortDir === "desc" ? "asc" : "desc";
-    else { state.sortBy = key; state.sortDir = "desc"; }
-    state.page = 0;
-    loadTrades(++reqSeq);
+  state.lastRows = data.rows;
+  buildTradesTable(data.rows, onSortHeader);
+}
+
+function onSortHeader(key) {
+  if (state.sortBy === key) state.sortDir = state.sortDir === "desc" ? "asc" : "desc";
+  else { state.sortBy = key; state.sortDir = "desc"; }
+  state.page = 0;
+  loadTrades(++reqSeq);
+}
+
+function wireColumnPicker() {
+  const btn = $("col-btn");
+  const menu = $("col-menu");
+  TRADE_COLS.forEach((c) => {
+    const row = document.createElement("label");
+    row.className = "ac-item";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = visibleColKeys.has(c.key);
+    cb.addEventListener("change", () => {
+      if (cb.checked) visibleColKeys.add(c.key);
+      else visibleColKeys.delete(c.key);
+      localStorage.setItem(COLS_LS_KEY, JSON.stringify([...visibleColKeys]));
+      if (state.lastRows) buildTradesTable(state.lastRows, onSortHeader);
+    });
+    const span = document.createElement("span");
+    span.textContent = c.label;
+    row.append(cb, span);
+    menu.append(row);
+  });
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    menu.hidden = !menu.hidden;
+  });
+  document.addEventListener("click", (e) => {
+    if (!menu.contains(e.target) && e.target !== btn) menu.hidden = true;
   });
 }
 
@@ -698,6 +739,7 @@ async function init() {
   $("pg-prev").addEventListener("click", () => { state.page--; loadTrades(++reqSeq); });
   $("pg-next").addEventListener("click", () => { state.page++; loadTrades(++reqSeq); });
 
+  wireColumnPicker();
   wireAutocomplete();
   await loadAll();
 }
