@@ -806,6 +806,17 @@ async function init() {
     });
   });
 
+  const pgSize = $("pg-size");
+  const storedSize = Number(localStorage.getItem("otc_page_size"));
+  if ([50, 100, 250, 500, 1000].includes(storedSize)) state.pageSize = storedSize;
+  pgSize.value = String(state.pageSize);
+  pgSize.addEventListener("change", () => {
+    state.pageSize = Number(pgSize.value);
+    localStorage.setItem("otc_page_size", pgSize.value);
+    state.page = 0;
+    loadTrades(++reqSeq);
+  });
+
   $("agg-by").addEventListener("change", (e) => { state.aggBy = e.target.value; loadAgg(++reqSeq); });
   $("pg-prev").addEventListener("click", () => { state.page--; loadTrades(++reqSeq); });
   $("pg-next").addEventListener("click", () => { state.page++; loadTrades(++reqSeq); });
