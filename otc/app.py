@@ -116,6 +116,43 @@ def build_where(
     return " and ".join(clauses), params
 
 
+TRADES_SELECT = """
+    select dissemination_id, chain_id, status, action_type, event_type,
+           execution_ts, effective_date, expiration_date,
+           underlier_name, upi_fisn, upi,
+           notional_leg1, notional_ccy_leg1, notional_capped,
+           total_notional_qty_leg1, qty_unit_leg1,
+           price, price_ccy, price_unit, spread_leg1, spread_leg2,
+           strike_price, option_type, option_style, option_premium,
+           platform_id, cleared, block_trade, custom_basket, package,
+           event_ts, file_date, first_event_ts,
+           case when upi_fisn like '%Call%' then 'C'
+                when upi_fisn like '%Put%' then 'P' end as option_cp,
+           datediff('day', execution_date, expiration_date) / 365.25 as tenor_yrs,
+           notional_leg1 / nullif(total_notional_qty_leg1, 0) as per_unit,
+           strike_price / nullif(ref_price, 0) as moneyness,
+           epoch(first_event_ts - execution_ts) as lag_seconds
+    from trades
+    left join spot_ref using (underlier_name, execution_date)
+    where {where}
+"""
+
+EXPORT_COLUMNS = {
+    "dissemination_id", "chain_id", "status", "action_type", "event_type",
+    "execution_ts", "effective_date", "expiration_date",
+    "underlier_name", "upi_fisn", "upi",
+    "notional_leg1", "notional_ccy_leg1", "notional_capped",
+    "total_notional_qty_leg1", "qty_unit_leg1",
+    "price", "price_ccy", "price_unit", "spread_leg1", "spread_leg2",
+    "strike_price", "option_type", "option_style", "option_premium",
+    "platform_id", "cleared", "block_trade", "custom_basket", "package",
+    "event_ts", "file_date", "first_event_ts",
+    "option_cp", "tenor_yrs", "per_unit", "moneyness", "lag_seconds",
+}
+
+EXPORT_MAX_ROWS = 200_000
+
+
 # ---------------------------------------------------------------- endpoints
 
 @app.get("/api/meta")
@@ -169,28 +206,63 @@ def trades(
         tenor_min, tenor_max)
     total = q(f"select count(*) n from trades where {where}", params)[0]["n"]
     rows = q(f"""
-        select dissemination_id, chain_id, status, action_type, event_type,
-               execution_ts, effective_date, expiration_date,
-               underlier_name, upi_fisn, upi,
-               notional_leg1, notional_ccy_leg1, notional_capped,
-               total_notional_qty_leg1, qty_unit_leg1,
-               price, price_ccy, price_unit, spread_leg1, spread_leg2,
-               strike_price, option_type, option_style, option_premium,
-               platform_id, cleared, block_trade, custom_basket, package,
-               event_ts, file_date, first_event_ts,
-               case when upi_fisn like '%Call%' then 'C'
-                    when upi_fisn like '%Put%' then 'P' end as option_cp,
-               datediff('day', execution_date, expiration_date) / 365.25 as tenor_yrs,
-               notional_leg1 / nullif(total_notional_qty_leg1, 0) as per_unit,
-               strike_price / nullif(ref_price, 0) as moneyness,
-               epoch(first_event_ts - execution_ts) as lag_seconds
-        from trades
-        left join spot_ref using (underlier_name, execution_date)
-        where {where}
+        {TRADES_SELECT.format(where=where)}
         order by {sort_by} {sort_dir} nulls last
         limit ? offset ?
     """, params + [limit, offset])
     return {"total": total, "rows": rows}
+
+
+@app.get("/api/trades.csv")
+def trades_csv(
+    underlier: Optional[str] = None, underlier_exact: Optional[str] = None,
+    fisn: Optional[str] = None, status: Optional[str] = None,
+    date_from: Optional[str] = None, date_to: Optional[str] = None,
+    exp_from: Optional[str] = None, exp_to: Optional[str] = None,
+    min_notional: Optional[float] = None, max_notional: Optional[float] = None,
+    platform: Optional[str] = None, cleared: Optional[str] = None,
+    option_type: Optional[str] = None, ccy: Optional[str] = None,
+    tenor_min: Optional[float] = None, tenor_max: Optional[float] = None,
+    sort_by: str = "execution_ts", sort_dir: str = "desc",
+    columns: str = "",
+):
+    import csv
+    import io
+
+    if sort_by not in SORTABLE:
+        raise HTTPException(400, f"sort_by must be one of {sorted(SORTABLE)}")
+    if sort_dir not in ("asc", "desc"):
+        raise HTTPException(400, "sort_dir must be asc or desc")
+    cols = [c for c in columns.split(",") if c.strip()]
+    if not cols:
+        cols = ["execution_ts", "underlier_name", "upi_fisn", "notional_leg1",
+                "notional_ccy_leg1", "price", "strike_price", "expiration_date", "status"]
+    bad = [c for c in cols if c not in EXPORT_COLUMNS]
+    if bad:
+        raise HTTPException(400, f"unknown columns: {bad}")
+    where, params = build_where(
+        underlier, underlier_exact, fisn, status, date_from, date_to, exp_from,
+        exp_to, min_notional, max_notional, platform, cleared, option_type, ccy,
+        tenor_min, tenor_max)
+    total = q(f"select count(*) n from trades where {where}", params)[0]["n"]
+    if total > EXPORT_MAX_ROWS:
+        raise HTTPException(
+            400, f"{total:,} rows match; export is capped at {EXPORT_MAX_ROWS:,}. "
+                 "Narrow the filters.")
+    with _lock:
+        rows = db().execute(f"""
+            select {', '.join(cols)}
+            from ({TRADES_SELECT.format(where=where)})
+            order by {sort_by} {sort_dir} nulls last
+        """, params).fetchall()
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(cols)
+    w.writerows(rows)
+    from fastapi.responses import Response as RawResponse
+    return RawResponse(
+        buf.getvalue(), media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="otc_trades.csv"'})
 
 
 @app.get("/api/aggregate")

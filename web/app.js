@@ -359,6 +359,58 @@ const TRADE_COLS = [
   { key: "status", label: "Status", render: (r) => badge(r.status) },
 ];
 
+// Raw fields exported per visible column; units/caps ride along as companions.
+const EXPORT_FIELDS = {
+  execution_ts: ["execution_ts"],
+  underlier_name: ["underlier_name"],
+  upi_fisn: ["upi_fisn"],
+  notional_leg1: ["notional_leg1", "notional_capped"],
+  notional_ccy_leg1: ["notional_ccy_leg1"],
+  total_notional_qty_leg1: ["total_notional_qty_leg1", "qty_unit_leg1"],
+  per_unit: ["per_unit"],
+  price: ["price", "price_unit"],
+  strike_price: ["strike_price"],
+  moneyness: ["moneyness"],
+  option_cp: ["option_cp"],
+  option_premium: ["option_premium"],
+  tenor_yrs: ["tenor_yrs"],
+  expiration_date: ["expiration_date"],
+  lag_seconds: ["lag_seconds"],
+  platform_id: ["platform_id"],
+  cleared: ["cleared"],
+  status: ["status"],
+};
+
+function exportFields() {
+  return visibleCols().flatMap((c) => EXPORT_FIELDS[c.key] || [c.key]);
+}
+
+async function downloadCSV() {
+  const btn = $("csv-btn");
+  btn.disabled = true;
+  try {
+    const p = filterParams();
+    p.set("sort_by", state.sortBy);
+    p.set("sort_dir", state.sortDir);
+    p.set("columns", exportFields().join(","));
+    const r = await fetch("/api/trades.csv?" + p);
+    if (!r.ok) {
+      let msg = await r.text();
+      try { msg = JSON.parse(msg).detail || msg; } catch {}
+      alert("Export failed: " + msg);
+      return;
+    }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `otc_trades_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 const COLS_LS_KEY = "otc_visible_cols";
 let visibleColKeys = new Set(
   JSON.parse(localStorage.getItem(COLS_LS_KEY) || "null") || TRADE_COLS.map((c) => c.key));
@@ -709,6 +761,7 @@ async function init() {
   $("pg-prev").addEventListener("click", () => { state.page--; loadTrades(++reqSeq); });
   $("pg-next").addEventListener("click", () => { state.page++; loadTrades(++reqSeq); });
 
+  $("csv-btn").addEventListener("click", downloadCSV);
   wireColumnPicker();
   wireAutocomplete();
   await loadAll();

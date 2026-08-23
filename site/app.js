@@ -125,12 +125,8 @@ async function apiUnderliers(query) {
   `);
 }
 
-async function apiTrades(f, sortBy, sortDir, limit, offset) {
-  if (!SORTABLE.has(sortBy)) sortBy = "execution_ts";
-  if (sortDir !== "asc" && sortDir !== "desc") sortDir = "desc";
-  const where = buildWhere(f);
-  const [{ n }] = await q(`select count(*)::double n from trades where ${where}`);
-  const rows = await q(`
+function tradesSelect(where) {
+  return `
     select cast(dissemination_id as varchar) dissemination_id, status,
            strftime(execution_ts, '%Y-%m-%d %H:%M:%S') execution_ts,
            cast(expiration_date as varchar) expiration_date,
@@ -147,7 +143,16 @@ async function apiTrades(f, sortBy, sortDir, limit, offset) {
            epoch(first_event_ts - execution_ts) as lag_seconds
     from trades
     left join spot_ref using (underlier_name, execution_date)
-    where ${where}
+    where ${where}`;
+}
+
+async function apiTrades(f, sortBy, sortDir, limit, offset) {
+  if (!SORTABLE.has(sortBy)) sortBy = "execution_ts";
+  if (sortDir !== "asc" && sortDir !== "desc") sortDir = "desc";
+  const where = buildWhere(f);
+  const [{ n }] = await q(`select count(*)::double n from trades where ${where}`);
+  const rows = await q(`
+    ${tradesSelect(where)}
     order by ${sortBy} ${sortDir} nulls last
     limit ${limit} offset ${offset}
   `);
@@ -490,6 +495,70 @@ const TRADE_COLS = [
   { key: "status", label: "Status", render: (r) => badge(r.status) },
 ];
 
+// Raw fields exported per visible column; units/caps ride along as companions.
+const EXPORT_FIELDS = {
+  execution_ts: ["execution_ts"],
+  underlier_name: ["underlier_name"],
+  upi_fisn: ["upi_fisn"],
+  notional_leg1: ["notional_leg1", "notional_capped"],
+  notional_ccy_leg1: ["notional_ccy_leg1"],
+  total_notional_qty_leg1: ["total_notional_qty_leg1", "qty_unit_leg1"],
+  per_unit: ["per_unit"],
+  price: ["price", "price_unit"],
+  strike_price: ["strike_price"],
+  moneyness: ["moneyness"],
+  option_cp: ["option_cp"],
+  option_premium: ["option_premium"],
+  tenor_yrs: ["tenor_yrs"],
+  expiration_date: ["expiration_date"],
+  lag_seconds: ["lag_seconds"],
+  platform_id: ["platform_id"],
+  cleared: ["cleared"],
+  status: ["status"],
+};
+
+function exportFields() {
+  return visibleCols().flatMap((c) => EXPORT_FIELDS[c.key] || [c.key]);
+}
+
+function csvCell(v) {
+  if (v == null) return "";
+  const s = String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+const EXPORT_MAX_ROWS = 200000;
+
+async function downloadCSV() {
+  const btn = $("csv-btn");
+  btn.disabled = true;
+  try {
+    const where = buildWhere(filters());
+    const [{ n }] = await q(`select count(*)::double n from trades where ${where}`);
+    if (n > EXPORT_MAX_ROWS) {
+      alert(`Export failed: ${n.toLocaleString()} rows match; capped at ${EXPORT_MAX_ROWS.toLocaleString()}. Narrow the filters.`);
+      return;
+    }
+    const cols = exportFields();
+    const sortBy = SORTABLE.has(state.sortBy) ? state.sortBy : "execution_ts";
+    const sortDir = state.sortDir === "asc" ? "asc" : "desc";
+    const rows = await q(`
+      select ${cols.join(", ")} from (${tradesSelect(where)})
+      order by ${sortBy} ${sortDir} nulls last
+    `);
+    const csv = [cols.join(",")]
+      .concat(rows.map((r) => cols.map((c) => csvCell(r[c])).join(",")))
+      .join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    a.download = `otc_trades_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 const COLS_LS_KEY = "otc_visible_cols";
 let visibleColKeys = new Set(
   JSON.parse(localStorage.getItem(COLS_LS_KEY) || "null") || TRADE_COLS.map((c) => c.key));
@@ -821,6 +890,7 @@ async function init() {
   $("pg-prev").addEventListener("click", () => { state.page--; loadTrades(++reqSeq); });
   $("pg-next").addEventListener("click", () => { state.page++; loadTrades(++reqSeq); });
 
+  $("csv-btn").addEventListener("click", downloadCSV);
   wireColumnPicker();
   wireAutocomplete();
   await loadAll();
