@@ -73,6 +73,7 @@ def build_where(
     min_notional: Optional[float], max_notional: Optional[float],
     platform: Optional[str], cleared: Optional[str], option_type: Optional[str],
     ccy: Optional[str],
+    tenor_min: Optional[float] = None, tenor_max: Optional[float] = None,
 ) -> tuple[str, list]:
     clauses, params = [], []
     if underlier:
@@ -82,8 +83,16 @@ def build_where(
         clauses.append("underlier_name = ?")
         params.append(underlier_exact)
     if fisn:
-        clauses.append("upper(coalesce(upi_fisn,'')) like '%' || upper(?) || '%'")
-        params.append(fisn)
+        # comma-separated list of exact FISN values (multi-select)
+        fisns = [f for f in fisn.split(",") if f.strip()]
+        clauses.append(f"upi_fisn in ({','.join('?' * len(fisns))})")
+        params.extend(fisns)
+    if tenor_min is not None:
+        clauses.append("datediff('day', execution_date, expiration_date) / 365.25 >= ?")
+        params.append(tenor_min)
+    if tenor_max is not None:
+        clauses.append("datediff('day', execution_date, expiration_date) / 365.25 <= ?")
+        params.append(tenor_max)
     statuses = [s.strip() for s in (status or "active,terminated").split(",") if s.strip()]
     clauses.append(f"status in ({','.join('?' * len(statuses))})")
     params.extend(statuses)
@@ -146,6 +155,7 @@ def trades(
     min_notional: Optional[float] = None, max_notional: Optional[float] = None,
     platform: Optional[str] = None, cleared: Optional[str] = None,
     option_type: Optional[str] = None, ccy: Optional[str] = None,
+    tenor_min: Optional[float] = None, tenor_max: Optional[float] = None,
     sort_by: str = "execution_ts", sort_dir: str = "desc",
     limit: int = Query(100, le=1000), offset: int = Query(0, ge=0),
 ):
@@ -155,7 +165,8 @@ def trades(
         raise HTTPException(400, "sort_dir must be asc or desc")
     where, params = build_where(
         underlier, underlier_exact, fisn, status, date_from, date_to, exp_from,
-        exp_to, min_notional, max_notional, platform, cleared, option_type, ccy)
+        exp_to, min_notional, max_notional, platform, cleared, option_type, ccy,
+        tenor_min, tenor_max)
     total = q(f"select count(*) n from trades where {where}", params)[0]["n"]
     rows = q(f"""
         select dissemination_id, chain_id, status, action_type, event_type,
@@ -192,6 +203,7 @@ def aggregate(
     min_notional: Optional[float] = None, max_notional: Optional[float] = None,
     platform: Optional[str] = None, cleared: Optional[str] = None,
     option_type: Optional[str] = None, ccy: Optional[str] = None,
+    tenor_min: Optional[float] = None, tenor_max: Optional[float] = None,
     limit: int = Query(500, le=5000),
 ):
     if group_by not in GROUP_BYS:
@@ -199,7 +211,8 @@ def aggregate(
     expr = GROUP_BYS[group_by]
     where, params = build_where(
         underlier, underlier_exact, fisn, status, date_from, date_to, exp_from,
-        exp_to, min_notional, max_notional, platform, cleared, option_type, ccy)
+        exp_to, min_notional, max_notional, platform, cleared, option_type, ccy,
+        tenor_min, tenor_max)
     order = "1" if group_by in ("execution_date", "week", "month") else "sum_notional desc nulls last"
     return q(f"""
         select {expr} as key,

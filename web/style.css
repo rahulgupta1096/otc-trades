@@ -116,7 +116,10 @@ tr:hover td { background: var(--series-1-soft); }
 
 .pager { display: flex; gap: 10px; align-items: center; }
 
+.num { width: 96px; }
+.numsm { width: 70px; }
 .colpick { position: relative; display: inline-block; }
+.colmenu.left { left: 0; right: auto; min-width: 250px; }
 .colmenu {
   left: auto; right: 0; top: 100%; min-width: 190px;
   text-align: left; padding: 4px 0; max-height: 480px;

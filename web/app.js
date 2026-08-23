@@ -7,9 +7,12 @@ const state = {
   from: null,
   to: null,
   underlier: "",
-  fisn: "",
+  fisns: [],
   status: "active,terminated",
   minNotional: "",
+  maxNotional: "",
+  tenorMin: "",
+  tenorMax: "",
   ccy: "",
   metric: "sum_notional",
   aggBy: "underlier_name",
@@ -77,17 +80,74 @@ function currentDates() {
   return { from: isoDaysAgo(Number(state.preset)), to: null };
 }
 
+function parseAmt(s) {
+  if (s == null) return null;
+  s = String(s).trim().toLowerCase().replace(/[$,\s]/g, "");
+  if (!s) return null;
+  const m = s.match(/^([0-9]*\.?[0-9]+)([kmbt])?$/);
+  if (!m) return null;
+  const mult = { k: 1e3, m: 1e6, b: 1e9, t: 1e12 }[m[2]] || 1;
+  return Number(m[1]) * mult;
+}
+
 function filterParams() {
   const { from, to } = currentDates();
   const p = new URLSearchParams();
   if (state.underlier) p.set("underlier", state.underlier);
-  if (state.fisn) p.set("fisn", state.fisn);
+  if (state.fisns.length) p.set("fisn", state.fisns.join(","));
   if (state.status) p.set("status", state.status);
   if (from) p.set("date_from", from);
   if (to) p.set("date_to", to);
-  if (state.minNotional) p.set("min_notional", state.minNotional);
+  const mn = parseAmt(state.minNotional), mx = parseAmt(state.maxNotional);
+  if (mn != null) p.set("min_notional", mn);
+  if (mx != null) p.set("max_notional", mx);
+  const tn = parseAmt(state.tenorMin), tx = parseAmt(state.tenorMax);
+  if (tn != null) p.set("tenor_min", tn);
+  if (tx != null) p.set("tenor_max", tx);
   if (state.ccy) p.set("ccy", state.ccy);
   return p;
+}
+
+function wireNumInput(id, setter) {
+  const el = $(id);
+  el.addEventListener("input", () => {
+    clearTimeout(el._t);
+    el._t = setTimeout(() => {
+      setter(el.value);
+      state.page = 0;
+      loadAll();
+    }, 450);
+  });
+}
+
+function wireFisnPicker(fisns) {
+  const btn = $("fisn-btn");
+  const menu = $("fisn-menu");
+  const update = () => {
+    btn.textContent = (state.fisns.length ? `${state.fisns.length} selected` : "All") + " ▾";
+  };
+  fisns.forEach((f) => {
+    const row = document.createElement("label");
+    row.className = "ac-item";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.addEventListener("change", () => {
+      if (cb.checked) state.fisns.push(f);
+      else state.fisns = state.fisns.filter((x) => x !== f);
+      update();
+      state.page = 0;
+      loadAll();
+    });
+    const span = document.createElement("span");
+    span.textContent = f;
+    row.append(cb, span);
+    menu.append(row);
+  });
+  btn.addEventListener("click", (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; });
+  document.addEventListener("click", (e) => {
+    if (!menu.contains(e.target) && e.target !== btn) menu.hidden = true;
+  });
+  update();
 }
 
 async function getJSON(url) {
@@ -602,12 +662,7 @@ async function init() {
   const meta = await getJSON("/api/meta");
   $("freshness").textContent =
     `${Number(meta.n_trades).toLocaleString()} final prints · ${fmtDate(meta.min_date)} → ${fmtDate(meta.max_date)} · latest file ${fmtDate(meta.latest_file)}`;
-  const fisn = $("f-fisn");
-  meta.fisns.forEach((f) => {
-    const o = document.createElement("option");
-    o.value = f; o.textContent = f;
-    fisn.append(o);
-  });
+  wireFisnPicker(meta.fisns);
   const ccy = $("f-ccy");
   meta.currencies.forEach((c) => {
     const o = document.createElement("option");
@@ -623,10 +678,12 @@ async function init() {
   });
   $("f-from").addEventListener("change", (e) => { state.from = e.target.value; state.page = 0; loadAll(); });
   $("f-to").addEventListener("change", (e) => { state.to = e.target.value; state.page = 0; loadAll(); });
-  $("f-fisn").addEventListener("change", (e) => { state.fisn = e.target.value; state.page = 0; loadAll(); });
   $("f-status").addEventListener("change", (e) => { state.status = e.target.value; state.page = 0; loadAll(); });
-  $("f-minnotional").addEventListener("change", (e) => { state.minNotional = e.target.value; state.page = 0; loadAll(); });
   $("f-ccy").addEventListener("change", (e) => { state.ccy = e.target.value; state.page = 0; loadAll(); });
+  wireNumInput("f-notional-min", (v) => { state.minNotional = v; });
+  wireNumInput("f-notional-max", (v) => { state.maxNotional = v; });
+  wireNumInput("f-tenor-min", (v) => { state.tenorMin = v; });
+  wireNumInput("f-tenor-max", (v) => { state.tenorMax = v; });
 
   document.querySelectorAll(".seg-btn").forEach((b) => {
     b.addEventListener("click", () => {

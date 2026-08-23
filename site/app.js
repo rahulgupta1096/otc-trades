@@ -77,12 +77,21 @@ const GROUP_BYS = {
 function buildWhere(f) {
   const c = [];
   if (f.underlier) c.push(`upper(coalesce(underlier_name,'')) like '%${esc(f.underlier.toUpperCase())}%'`);
-  if (f.fisn) c.push(`upper(coalesce(upi_fisn,'')) like '%${esc(f.fisn.toUpperCase())}%'`);
+  if (f.fisns && f.fisns.length) {
+    c.push(`upi_fisn in (${f.fisns.map((x) => `'${esc(x)}'`).join(",")})`);
+  }
+  if (f.tenor_min != null) {
+    c.push(`datediff('day', execution_date, expiration_date) / 365.25 >= ${Number(f.tenor_min)}`);
+  }
+  if (f.tenor_max != null) {
+    c.push(`datediff('day', execution_date, expiration_date) / 365.25 <= ${Number(f.tenor_max)}`);
+  }
   const statuses = (f.status || "active,terminated").split(",").filter(Boolean);
   c.push(`status in (${statuses.map((s) => `'${esc(s)}'`).join(",")})`);
   if (f.date_from) c.push(`execution_date >= date '${esc(f.date_from)}'`);
   if (f.date_to) c.push(`execution_date <= date '${esc(f.date_to)}'`);
-  if (f.min_notional) c.push(`notional_leg1 >= ${Number(f.min_notional)}`);
+  if (f.min_notional != null) c.push(`notional_leg1 >= ${Number(f.min_notional)}`);
+  if (f.max_notional != null) c.push(`notional_leg1 <= ${Number(f.max_notional)}`);
   if (f.ccy) c.push(`notional_ccy_leg1 = '${esc(f.ccy)}'`);
   return c.join(" and ");
 }
@@ -165,8 +174,8 @@ async function apiAggregate(groupBy, f, limit = 500) {
 
 const state = {
   preset: "30", from: null, to: null,
-  underlier: "", fisn: "", status: "active,terminated",
-  minNotional: "", ccy: "",
+  underlier: "", fisns: [], status: "active,terminated",
+  minNotional: "", maxNotional: "", tenorMin: "", tenorMax: "", ccy: "",
   metric: "sum_notional", aggBy: "underlier_name",
   sortBy: "execution_ts", sortDir: "desc",
   page: 0, pageSize: 50, total: 0,
@@ -221,12 +230,69 @@ function currentDates() {
   if (state.preset === "all") return { from: null, to: null };
   return { from: isoDaysAgo(Number(state.preset)), to: null };
 }
+function parseAmt(s) {
+  if (s == null) return null;
+  s = String(s).trim().toLowerCase().replace(/[$,\s]/g, "");
+  if (!s) return null;
+  const m = s.match(/^([0-9]*\.?[0-9]+)([kmbt])?$/);
+  if (!m) return null;
+  const mult = { k: 1e3, m: 1e6, b: 1e9, t: 1e12 }[m[2]] || 1;
+  return Number(m[1]) * mult;
+}
+
 function filters() {
   const { from, to } = currentDates();
   return {
-    underlier: state.underlier, fisn: state.fisn, status: state.status,
-    date_from: from, date_to: to, min_notional: state.minNotional, ccy: state.ccy,
+    underlier: state.underlier, fisns: state.fisns, status: state.status,
+    date_from: from, date_to: to,
+    min_notional: parseAmt(state.minNotional),
+    max_notional: parseAmt(state.maxNotional),
+    tenor_min: parseAmt(state.tenorMin),
+    tenor_max: parseAmt(state.tenorMax),
+    ccy: state.ccy,
   };
+}
+
+function wireNumInput(id, setter) {
+  const el = $(id);
+  el.addEventListener("input", () => {
+    clearTimeout(el._t);
+    el._t = setTimeout(() => {
+      setter(el.value);
+      state.page = 0;
+      loadAll();
+    }, 450);
+  });
+}
+
+function wireFisnPicker(fisns) {
+  const btn = $("fisn-btn");
+  const menu = $("fisn-menu");
+  const update = () => {
+    btn.textContent = (state.fisns.length ? `${state.fisns.length} selected` : "All") + " ▾";
+  };
+  fisns.forEach((f) => {
+    const row = document.createElement("label");
+    row.className = "ac-item";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.addEventListener("change", () => {
+      if (cb.checked) state.fisns.push(f);
+      else state.fisns = state.fisns.filter((x) => x !== f);
+      update();
+      state.page = 0;
+      loadAll();
+    });
+    const span = document.createElement("span");
+    span.textContent = f;
+    row.append(cb, span);
+    menu.append(row);
+  });
+  btn.addEventListener("click", (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; });
+  document.addEventListener("click", (e) => {
+    if (!menu.contains(e.target) && e.target !== btn) menu.hidden = true;
+  });
+  update();
 }
 
 function showTooltip(parts, x, y) {
@@ -708,12 +774,7 @@ async function init() {
   const meta = await apiMeta();
   $("freshness").textContent =
     `${Number(meta.n_trades).toLocaleString()} final prints · ${fmtDate(meta.min_date)} → ${fmtDate(meta.max_date)} · latest file ${fmtDate(meta.latest_file)}`;
-  const fisn = $("f-fisn");
-  meta.fisns.forEach((f) => {
-    const o = document.createElement("option");
-    o.value = f; o.textContent = f;
-    fisn.append(o);
-  });
+  wireFisnPicker(meta.fisns);
   const ccy = $("f-ccy");
   meta.currencies.forEach((c) => {
     const o = document.createElement("option");
@@ -729,10 +790,12 @@ async function init() {
   });
   $("f-from").addEventListener("change", (e) => { state.from = e.target.value; state.page = 0; loadAll(); });
   $("f-to").addEventListener("change", (e) => { state.to = e.target.value; state.page = 0; loadAll(); });
-  $("f-fisn").addEventListener("change", (e) => { state.fisn = e.target.value; state.page = 0; loadAll(); });
   $("f-status").addEventListener("change", (e) => { state.status = e.target.value; state.page = 0; loadAll(); });
-  $("f-minnotional").addEventListener("change", (e) => { state.minNotional = e.target.value; state.page = 0; loadAll(); });
   $("f-ccy").addEventListener("change", (e) => { state.ccy = e.target.value; state.page = 0; loadAll(); });
+  wireNumInput("f-notional-min", (v) => { state.minNotional = v; });
+  wireNumInput("f-notional-max", (v) => { state.maxNotional = v; });
+  wireNumInput("f-tenor-min", (v) => { state.tenorMin = v; });
+  wireNumInput("f-tenor-max", (v) => { state.tenorMax = v; });
 
   document.querySelectorAll(".seg-btn").forEach((b) => {
     b.addEventListener("click", () => {

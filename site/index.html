@@ -35,8 +35,11 @@
       <div id="ac" class="ac" hidden></div>
     </div>
     <div class="field">
-      <label for="f-fisn">Product (FISN)</label>
-      <select id="f-fisn"><option value="">All</option></select>
+      <label>Product (FISN)</label>
+      <span class="colpick">
+        <button id="fisn-btn">All ▾</button>
+        <div id="fisn-menu" class="ac colmenu left" hidden></div>
+      </span>
     </div>
     <div class="field">
       <label for="f-status">Status</label>
@@ -47,13 +50,18 @@
       </select>
     </div>
     <div class="field">
-      <label for="f-minnotional">Min notional</label>
-      <select id="f-minnotional">
-        <option value="">Any</option>
-        <option value="1000000">≥ $1M</option>
-        <option value="10000000">≥ $10M</option>
-        <option value="100000000">≥ $100M</option>
-      </select>
+      <label>Notional</label>
+      <span>
+        <input type="text" id="f-notional-min" class="num" placeholder="min · 10m">
+        <input type="text" id="f-notional-max" class="num" placeholder="max">
+      </span>
+    </div>
+    <div class="field">
+      <label>Tenor (yrs)</label>
+      <span>
+        <input type="text" id="f-tenor-min" class="num numsm" placeholder="min">
+        <input type="text" id="f-tenor-max" class="num numsm" placeholder="max">
+      </span>
     </div>
     <div class="field">
       <label for="f-ccy">Notional ccy</label>
