@@ -42,6 +42,14 @@
       </span>
     </div>
     <div class="field">
+      <label for="f-source">Source</label>
+      <select id="f-source">
+        <option value="">All</option>
+        <option value="CFTC">CFTC</option>
+        <option value="SEC">SEC</option>
+      </select>
+    </div>
+    <div class="field">
       <label for="f-status">Status</label>
       <select id="f-status">
         <option value="active,terminated" selected>Active + terminated</option>
@@ -89,6 +97,7 @@
         <label for="agg-by">Group by</label>
         <select id="agg-by">
           <option value="underlier_name" selected>Underlier</option>
+          <option value="source">Source</option>
           <option value="execution_date">Day</option>
           <option value="week">Week</option>
           <option value="month">Month</option>

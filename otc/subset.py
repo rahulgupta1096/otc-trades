@@ -50,8 +50,11 @@ def _posix(p: Path) -> str:
 
 def load_state() -> dict:
     if STATE_PATH.exists():
-        return json.loads(STATE_PATH.read_text())
-    return {"merged_file_dates": []}
+        s = json.loads(STATE_PATH.read_text())
+        if "merged_file_dates" in s:  # legacy, CFTC-only format
+            s = {"merged_files": [f"CFTC_{d}" for d in s["merged_file_dates"]]}
+        return s
+    return {"merged_files": []}
 
 
 def save_state(state: dict) -> None:
@@ -124,23 +127,25 @@ def rebuild() -> None:
     for old in MONTHS_DIR.glob("*.parquet"):
         old.unlink()
     write_months(con, "final", None)
-    file_dates = [r[0] for r in con.execute(f"""
-        select distinct cast(parse_filename(filename, true) as date)
+    file_keys = [r[0] for r in con.execute(f"""
+        select distinct parse_filename(filename, true)
         from glob('{_posix(PARQUET_DIR / "*.parquet")}') t(filename) order by 1
     """).fetchall()]
-    save_state({"merged_file_dates": [str(d) for d in file_dates]})
+    save_state({"merged_files": file_keys})
     export_site(con)
 
 
 def update() -> None:
     state = load_state()
-    merged = set(state["merged_file_dates"])
+    merged = set(state["merged_files"])
     new_zips = []
-    for zp in sorted(RAW_DIR.glob("CFTC_CUMULATIVE_EQUITIES_*.zip")):
+    for zp in sorted(RAW_DIR.glob("*_CUMULATIVE_EQUITIES_*.zip")):
         m = FILE_RE.search(zp.name)
-        fd = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-        if fd not in merged:
-            new_zips.append((fd, zp))
+        source = m.group(1)
+        fd = f"{m.group(2)}-{m.group(3)}-{m.group(4)}"
+        key = f"{source}_{fd}"
+        if key not in merged:
+            new_zips.append((key, source, fd, zp))
     if not new_zips:
         print("No new files to merge.")
         con = duckdb.connect()
@@ -151,7 +156,7 @@ def update() -> None:
     con.execute("set preserve_insertion_order=false")
     con.execute("create temp table new_rows as select * from (select 1) where false")
     first = True
-    for fd, zp in new_zips:
+    for key, source, fd, zp in new_zips:
         with zipfile.ZipFile(zp) as zf:
             names = [n for n in zf.namelist() if n.endswith(".csv")]
             with tempfile.TemporaryDirectory() as tmp:
@@ -159,7 +164,7 @@ def update() -> None:
                 csv_path = _posix(Path(tmp) / names[0]).replace("'", "''")
                 sql = f"""
                     select {BASE_COLUMNS_SQL} from (
-                        select *, date '{fd}' as file_date
+                        select *, date '{fd}' as file_date, '{source}' as source
                         from ({select_sql(csv_path)})
                     ) where {SUBSET_WHERE}
                 """
@@ -168,7 +173,7 @@ def update() -> None:
                     first = False
                 else:
                     con.execute(f"insert into new_rows {sql}")
-        print(f"read {fd}", flush=True)
+        print(f"read {key}", flush=True)
 
     existing_glob = _posix(MONTHS_DIR / "*.parquet")
     have_existing = any(MONTHS_DIR.glob("*.parquet"))
@@ -184,8 +189,9 @@ def update() -> None:
         """)
 
     src = """
-        select * exclude (month) from existing
-        where chain_id in (select distinct chain_id from new_rows)
+        select * exclude (month) from existing e
+        where exists (select 1 from new_rows n
+                      where n.source = e.source and n.chain_id = e.chain_id)
         union all by name
         select * from new_rows
     """
@@ -195,20 +201,22 @@ def update() -> None:
     """)
     # months to rewrite: where affected chains lived before + where they live now
     touched = {r[0] for r in con.execute("""
-        select distinct month from existing
-        where chain_id in (select distinct chain_id from new_rows)
+        select distinct month from existing e
+        where exists (select 1 from new_rows n
+                      where n.source = e.source and n.chain_id = e.chain_id)
         union
         select distinct month from merged_final
     """).fetchall()}
     con.execute("""
         create temp table new_state as
-        select * from existing
-        where chain_id not in (select distinct chain_id from new_rows)
+        select * from existing e
+        where not exists (select 1 from new_rows n
+                          where n.source = e.source and n.chain_id = e.chain_id)
         union all by name
         select * from merged_final
     """)
     write_months(con, "new_state", sorted(touched))
-    state["merged_file_dates"] = sorted(merged | {fd for fd, _ in new_zips})
+    state["merged_files"] = sorted(merged | {key for key, _, _, _ in new_zips})
     save_state(state)
     export_site(con)
     print(f"merged {len(new_zips)} new file(s); rewrote months: {', '.join(sorted(touched))}")

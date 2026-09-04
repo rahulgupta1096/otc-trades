@@ -19,7 +19,7 @@ from datetime import date, timedelta
 
 import requests
 
-from .config import RAW_DIR, START_DATE, URL_TEMPLATE
+from .config import RAW_DIR, SOURCES, START_DATE
 
 MAX_ATTEMPTS = 5
 CONCURRENCY = 4
@@ -32,8 +32,8 @@ def date_range(start: date, end: date):
         d += timedelta(days=1)
 
 
-def target_path(d: date):
-    return RAW_DIR / f"CFTC_CUMULATIVE_EQUITIES_{d.year}_{d.month:02d}_{d.day:02d}.zip"
+def target_path(source: str, d: date):
+    return RAW_DIR / f"{source}_CUMULATIVE_EQUITIES_{d.year}_{d.month:02d}_{d.day:02d}.zip"
 
 
 def is_valid_zip(path) -> bool:
@@ -44,12 +44,12 @@ def is_valid_zip(path) -> bool:
         return False
 
 
-def fetch_day(d: date, session: requests.Session) -> str:
+def fetch_day(source: str, d: date, session: requests.Session) -> str:
     """Returns 'ok', 'cached', or 'missing'."""
-    path = target_path(d)
+    path = target_path(source, d)
     if path.exists() and is_valid_zip(path):
         return "cached"
-    url = URL_TEMPLATE.format(y=d.year, m=d.month, d=d.day)
+    url = SOURCES[source].format(y=d.year, m=d.month, d=d.day)
     consecutive_404 = 0
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -71,25 +71,26 @@ def fetch_day(d: date, session: requests.Session) -> str:
     return "missing"
 
 
-def main(start: date, end: date) -> None:
-    days = list(date_range(start, end))
+def main(start: date, end: date, sources: list[str] | None = None) -> None:
+    sources = sources or list(SOURCES)
+    jobs = [(s, d) for s in sources for d in date_range(start, end)]
     counts = {"ok": 0, "cached": 0, "missing": 0}
     missing: list[str] = []
     t0 = time.time()
     with requests.Session() as session, ThreadPoolExecutor(CONCURRENCY) as pool:
-        futures = {pool.submit(fetch_day, d, session): d for d in days}
+        futures = {pool.submit(fetch_day, s, d, session): (s, d) for s, d in jobs}
         done = 0
         for fut in as_completed(futures):
-            d = futures[fut]
+            s, d = futures[fut]
             status = fut.result()
             counts[status] += 1
             if status == "missing":
-                missing.append(d.isoformat())
+                missing.append(f"{s} {d.isoformat()}")
             done += 1
-            if done % 25 == 0 or done == len(days):
+            if done % 25 == 0 or done == len(jobs):
                 elapsed = time.time() - t0
                 print(
-                    f"[{done}/{len(days)}] ok={counts['ok']} cached={counts['cached']} "
+                    f"[{done}/{len(jobs)}] ok={counts['ok']} cached={counts['cached']} "
                     f"missing={counts['missing']} elapsed={elapsed:.0f}s",
                     flush=True,
                 )
@@ -98,6 +99,8 @@ def main(start: date, end: date) -> None:
 
 
 if __name__ == "__main__":
-    start = date.fromisoformat(sys.argv[1]) if len(sys.argv) > 1 else date.fromisoformat(START_DATE)
-    end = date.fromisoformat(sys.argv[2]) if len(sys.argv) > 2 else date.today()
-    main(start, end)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    only = [a.split("=", 1)[1].upper() for a in sys.argv[1:] if a.startswith("--source=")]
+    start = date.fromisoformat(args[0]) if args else date.fromisoformat(START_DATE)
+    end = date.fromisoformat(args[1]) if len(args) > 1 else date.today()
+    main(start, end, only or None)

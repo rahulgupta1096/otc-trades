@@ -39,9 +39,9 @@ FINAL_SELECT = """
     from (
         select *
             replace (min(coalesce(first_event_ts, event_ts))
-                         over (partition by chain_id) as first_event_ts),
+                         over (partition by source, chain_id) as first_event_ts),
             row_number() over (
-                partition by chain_id
+                partition by source, chain_id
                 order by event_ts desc nulls last, file_date desc, dissemination_id desc
             ) as rn
         from ({src})
@@ -89,7 +89,7 @@ def full_build(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(f"create or replace table trades as {FINAL_SELECT.format(src=src)}")
     con.execute(f"""
         create or replace table ingested_files as
-        select distinct cast(parse_filename(filename, true) as date) as file_date
+        select distinct parse_filename(filename, true) as file_key
         from glob('{parquet_glob()}') t(filename)
     """)
 
@@ -97,8 +97,8 @@ def full_build(con: duckdb.DuckDBPyConnection) -> None:
 def incremental(con: duckdb.DuckDBPyConnection) -> int:
     new_files = con.execute(f"""
         select filename from glob('{parquet_glob()}') t(filename)
-        where cast(parse_filename(filename, true) as date) not in
-              (select file_date from ingested_files)
+        where parse_filename(filename, true) not in
+              (select file_key from ingested_files)
         order by 1
     """).fetchall()
     if not new_files:
@@ -112,17 +112,23 @@ def incremental(con: duckdb.DuckDBPyConnection) -> int:
     src = """
         select * from new_rows
         union all by name
-        select * from trades where chain_id in (select distinct chain_id from new_rows)
+        select * from trades t
+        where exists (select 1 from new_rows n
+                      where n.source = t.source and n.chain_id = t.chain_id)
     """
     con.execute(f"create or replace temp table merged as {FINAL_SELECT.format(src=src)}")
-    con.execute("delete from trades where chain_id in (select chain_id from merged)")
+    con.execute("""
+        delete from trades
+        using (select distinct source, chain_id from merged) m
+        where trades.source = m.source and trades.chain_id = m.chain_id
+    """)
     con.execute("insert into trades by name select * from merged")
     con.execute(f"""
         insert into ingested_files
-        select distinct cast(parse_filename(filename, true) as date)
+        select distinct parse_filename(filename, true)
         from glob('{parquet_glob()}') t(filename)
-        where cast(parse_filename(filename, true) as date) not in
-              (select file_date from ingested_files)
+        where parse_filename(filename, true) not in
+              (select file_key from ingested_files)
     """)
     return len(new_files)
 

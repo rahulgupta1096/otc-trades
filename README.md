@@ -1,9 +1,12 @@
 # OTC Equity Trades
 
-Local webapp over the CFTC **Cumulative Equities** swap-dissemination data from
-[DTCC's public price dissemination portal](https://pddata.dtcc.com/ppd/cftcdashboard),
+Local webapp over the **CFTC and SEC Cumulative Equities** swap-dissemination
+data from [DTCC's public price dissemination portal](https://pddata.dtcc.com/ppd/cftcdashboard),
 with filtering, querying, and aggregation on the **final state of each trade**
-(revision history collapsed away).
+(revision history collapsed away). CFTC covers broad-index swaps; SEC covers
+security-based swaps (single names, narrow indices). Both regimes share one
+schema; every row carries a `source` column and revision chains are scoped per
+source (dissemination IDs can collide across regimes).
 
 ## Pipeline
 

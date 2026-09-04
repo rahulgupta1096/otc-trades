@@ -63,7 +63,7 @@ COLUMNS: dict[str, tuple[str, str]] = {
     "UPI Underlier Name": ("underlier_name", "text"),
 }
 
-FILE_RE = re.compile(r"CFTC_CUMULATIVE_EQUITIES_(\d{4})_(\d{2})_(\d{2})\.zip$")
+FILE_RE = re.compile(r"(CFTC|SEC)_CUMULATIVE_EQUITIES_(\d{4})_(\d{2})_(\d{2})\.zip$")
 
 
 def _num(src: str) -> str:
@@ -98,7 +98,7 @@ def select_sql(csv_path: str) -> str:
         select {', '.join(exprs)}
         from read_csv('{csv_path}', all_varchar=true, header=true,
                       delim=',', quote='"', escape='"',
-                      ignore_errors=true, null_padding=true)
+                      ignore_errors=true, null_padding=true, strict_mode=false)
         where not ({exclude})
     """
 
@@ -110,11 +110,12 @@ def ingest_zip(con: duckdb.DuckDBPyConnection, zip_path: Path, out_path: Path) -
             zf.extract(names[0], tmp)
             csv_path = str(Path(tmp) / names[0]).replace("'", "''").replace("\\", "/")
             m = FILE_RE.search(zip_path.name)
-            file_date = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+            source = m.group(1)
+            file_date = f"{m.group(2)}-{m.group(3)}-{m.group(4)}"
             tmp_out = out_path.with_suffix(".parquet.tmp")
             con.execute(f"""
                 copy (
-                    select *, date '{file_date}' as file_date
+                    select *, date '{file_date}' as file_date, '{source}' as source
                     from ({select_sql(csv_path)})
                 ) to '{str(tmp_out).replace("\\", "/")}' (format parquet, compression zstd)
             """)
@@ -125,14 +126,14 @@ def ingest_zip(con: duckdb.DuckDBPyConnection, zip_path: Path, out_path: Path) -
 
 
 def main(force: bool = False) -> None:
-    zips = sorted(RAW_DIR.glob("CFTC_CUMULATIVE_EQUITIES_*.zip"))
+    zips = sorted(RAW_DIR.glob("*_CUMULATIVE_EQUITIES_*.zip"))
     con = duckdb.connect()
     con.execute("set preserve_insertion_order=false")
     done = skipped = failed = 0
     t0 = time.time()
     for zp in zips:
         m = FILE_RE.search(zp.name)
-        out = PARQUET_DIR / f"{m.group(1)}-{m.group(2)}-{m.group(3)}.parquet"
+        out = PARQUET_DIR / f"{m.group(1)}_{m.group(2)}-{m.group(3)}-{m.group(4)}.parquet"
         if out.exists() and not force:
             skipped += 1
             continue

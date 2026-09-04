@@ -11,10 +11,18 @@ DB_PATH = DATA_DIR / "trades.duckdb"
 # requests before the window 404 and are simply skipped.
 START_DATE = "2024-08-01"
 
-URL_TEMPLATE = (
-    "https://pddata.dtcc.com/ppd/api/report/cumulative/cftc/"
-    "CFTC_CUMULATIVE_EQUITIES_{y}_{m:02d}_{d:02d}.zip"
-)
+# Regulatory regimes published on DTCC's portal. CFTC covers broad-index
+# swaps; SEC covers security-based swaps (single names, narrow indices).
+SOURCES = {
+    "CFTC": (
+        "https://pddata.dtcc.com/ppd/api/report/cumulative/cftc/"
+        "CFTC_CUMULATIVE_EQUITIES_{y}_{m:02d}_{d:02d}.zip"
+    ),
+    "SEC": (
+        "https://pddata.dtcc.com/ppd/api/report/cumulative/sec/"
+        "SEC_CUMULATIVE_EQUITIES_{y}_{m:02d}_{d:02d}.zip"
+    ),
+}
 
 # Rows whose UPI Underlier Name matches any of these regexes are dropped at
 # ingest: aggregate Taiwan buckets, Chinese A-shares, Thai NVDRs, and other

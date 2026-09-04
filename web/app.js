@@ -14,6 +14,7 @@ const state = {
   tenorMin: "",
   tenorMax: "",
   ccy: "",
+  source: "",
   metric: "sum_notional",
   aggBy: "underlier_name",
   sortBy: "execution_ts",
@@ -105,6 +106,7 @@ function filterParams() {
   if (tn != null) p.set("tenor_min", tn);
   if (tx != null) p.set("tenor_max", tx);
   if (state.ccy) p.set("ccy", state.ccy);
+  if (state.source) p.set("source", state.source);
   return p;
 }
 
@@ -340,6 +342,7 @@ function badge(status) {
 
 const TRADE_COLS = [
   { key: "execution_ts", label: "Executed", sortable: true, render: (r) => fmtTs(r.execution_ts) },
+  { key: "source", label: "Src" },
   { key: "underlier_name", label: "Underlier", sortable: true, cls: "name" },
   { key: "upi_fisn", label: "Product", cls: "name" },
   { key: "notional_leg1", label: "Notional", sortable: true, render: (r) => fmtCompact(r.notional_leg1, "") + (r.notional_capped ? "+" : "") },
@@ -362,6 +365,7 @@ const TRADE_COLS = [
 // Raw fields exported per visible column; units/caps ride along as companions.
 const EXPORT_FIELDS = {
   execution_ts: ["execution_ts"],
+  source: ["source"],
   underlier_name: ["underlier_name"],
   upi_fisn: ["upi_fisn"],
   notional_leg1: ["notional_leg1", "notional_capped"],
@@ -441,6 +445,7 @@ function groupSummaryValue(col, legs) {
       frag.append(caret, document.createTextNode(fmtTs(first.execution_ts)));
       return frag;
     }
+    case "source": return first.source;
     case "underlier_name": return first.underlier_name;
     case "upi_fisn": return `${legs.length}-leg structure`;
     case "notional_leg1": return fmtCompact(sum("notional_leg1"), "");
@@ -732,6 +737,7 @@ async function init() {
   $("f-to").addEventListener("change", (e) => { state.to = e.target.value; state.page = 0; loadAll(); });
   $("f-status").addEventListener("change", (e) => { state.status = e.target.value; state.page = 0; loadAll(); });
   $("f-ccy").addEventListener("change", (e) => { state.ccy = e.target.value; state.page = 0; loadAll(); });
+  $("f-source").addEventListener("change", (e) => { state.source = e.target.value; state.page = 0; loadAll(); });
   wireNumInput("f-notional-min", (v) => { state.minNotional = v; });
   wireNumInput("f-notional-max", (v) => { state.maxNotional = v; });
   wireNumInput("f-tenor-min", (v) => { state.tenorMin = v; });

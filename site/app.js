@@ -61,6 +61,7 @@ const SORTABLE = new Set([
 
 const GROUP_BYS = {
   all: "'all'",
+  source: "source",
   underlier_name: "underlier_name",
   execution_date: "cast(execution_date as varchar)",
   week: "cast(date_trunc('week', execution_date) as varchar)",
@@ -76,6 +77,7 @@ const GROUP_BYS = {
 
 function buildWhere(f) {
   const c = [];
+  if (f.source) c.push(`source = '${esc(f.source)}'`);
   if (f.underlier) c.push(`upper(coalesce(underlier_name,'')) like '%${esc(f.underlier.toUpperCase())}%'`);
   if (f.fisns && f.fisns.length) {
     c.push(`upi_fisn in (${f.fisns.map((x) => `'${esc(x)}'`).join(",")})`);
@@ -127,7 +129,7 @@ async function apiUnderliers(query) {
 
 function tradesSelect(where) {
   return `
-    select cast(dissemination_id as varchar) dissemination_id, status,
+    select source, cast(dissemination_id as varchar) dissemination_id, status,
            strftime(execution_ts, '%Y-%m-%d %H:%M:%S') execution_ts,
            cast(expiration_date as varchar) expiration_date,
            underlier_name, upi_fisn, upi,
@@ -181,6 +183,7 @@ const state = {
   preset: "30", from: null, to: null,
   underlier: "", fisns: [], status: "active,terminated",
   minNotional: "", maxNotional: "", tenorMin: "", tenorMax: "", ccy: "",
+  source: "",
   metric: "sum_notional", aggBy: "underlier_name",
   sortBy: "execution_ts", sortDir: "desc",
   page: 0, pageSize: 50, total: 0,
@@ -255,6 +258,7 @@ function filters() {
     tenor_min: parseAmt(state.tenorMin),
     tenor_max: parseAmt(state.tenorMax),
     ccy: state.ccy,
+    source: state.source,
   };
 }
 
@@ -476,6 +480,7 @@ function badge(status) {
 
 const TRADE_COLS = [
   { key: "execution_ts", label: "Executed", sortable: true, render: (r) => fmtTs(r.execution_ts) },
+  { key: "source", label: "Src" },
   { key: "underlier_name", label: "Underlier", sortable: true, cls: "name" },
   { key: "upi_fisn", label: "Product", cls: "name" },
   { key: "notional_leg1", label: "Notional", sortable: true, render: (r) => fmtCompact(r.notional_leg1, "") + (r.notional_capped ? "+" : "") },
@@ -498,6 +503,7 @@ const TRADE_COLS = [
 // Raw fields exported per visible column; units/caps ride along as companions.
 const EXPORT_FIELDS = {
   execution_ts: ["execution_ts"],
+  source: ["source"],
   underlier_name: ["underlier_name"],
   upi_fisn: ["upi_fisn"],
   notional_leg1: ["notional_leg1", "notional_capped"],
@@ -589,6 +595,7 @@ function groupSummaryValue(col, legs) {
       frag.append(caret, document.createTextNode(fmtTs(first.execution_ts)));
       return frag;
     }
+    case "source": return first.source;
     case "underlier_name": return first.underlier_name;
     case "upi_fisn": return `${legs.length}-leg structure`;
     case "notional_leg1": return fmtCompact(sum("notional_leg1"), "");
@@ -861,6 +868,7 @@ async function init() {
   $("f-to").addEventListener("change", (e) => { state.to = e.target.value; state.page = 0; loadAll(); });
   $("f-status").addEventListener("change", (e) => { state.status = e.target.value; state.page = 0; loadAll(); });
   $("f-ccy").addEventListener("change", (e) => { state.ccy = e.target.value; state.page = 0; loadAll(); });
+  $("f-source").addEventListener("change", (e) => { state.source = e.target.value; state.page = 0; loadAll(); });
   wireNumInput("f-notional-min", (v) => { state.minNotional = v; });
   wireNumInput("f-notional-max", (v) => { state.maxNotional = v; });
   wireNumInput("f-tenor-min", (v) => { state.tenorMin = v; });
