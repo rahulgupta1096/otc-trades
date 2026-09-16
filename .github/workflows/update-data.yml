@@ -2,7 +2,11 @@ name: Update data and deploy
 
 on:
   schedule:
-    - cron: "0 12 * * *"   # daily, after DTCC publishes the prior day's file
+    # DTCC publishes day D's file ~21:30-01:00 UTC that evening; the 02:30 run
+    # catches it same-evening (US time), the 12:00 run mops up late publications.
+    # GitHub crons drift by hours under load - two runs also hedge that.
+    - cron: "30 2 * * *"
+    - cron: "0 12 * * *"
   workflow_dispatch:
   push:
     branches: [main]
